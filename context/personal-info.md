@@ -2,16 +2,14 @@
 
 ## Deine Rolle
 
-[Dein Titel, Funktion und Hauptverantwortlichkeiten. Wofür bist du verantwortlich?]
+Benutzer und Auftraggeber. Prüft Ergebnisse, gibt Feedback.
 
 ## Kernaufgaben
 
-[Bereiche die du verantwortest oder zu denen du beiträgst.]
-
--
--
--
+- Ergebnisse testen und bewerten
+- Feedback geben
+- Anforderungen definieren
 
 ## Wie dieser Workspace hilft
 
-[Welche wiederkehrenden Aufgaben, Analysen oder Entscheidungen soll Claude unterstützen?]
+Claude übernimmt die komplette Entwicklung: Architektur, Implementierung, Testing und Bereitstellung als produktionsreifes Tool.

@@ -2,20 +2,21 @@
 
 ## Aktueller Fokuszeitraum
 
-[Welchen Zeitraum deckt das ab? Q1 2026? Ganzes Jahr? Eine bestimmte Initiative?]
+Initiale Entwicklung — Q2 2026
 
 ## Strategische Prioritäten
 
-[2-5 Kernprioritäten auf die du dich fokussierst.]
-
-1.
-2.
-3.
+1. Hohe Transkriptions-Genauigkeit (Whisper large-v3)
+2. Schnelle Verarbeitung (Apple Silicon optimiert via mlx-whisper)
+3. Einfache Installation auf verschiedenen Macs
 
 ## Wie Erfolg aussieht
 
-[Ergebnisse oder Meilensteine die zählen.]
+- Audio/Video-Dateien werden zuverlässig und schnell transkribiert
+- Live-Mikrofoneingabe wird in Echtzeit in Eingabefelder eingetragen
+- Screenshots werden per OCR erkannt und Text in Eingabefelder eingefügt
+- Das Tool lässt sich einfach auf anderen Rechnern installieren
 
 ## Offene Entscheidungen oder Fragen
 
-[Strategische Spannungen, Trade-offs oder Entscheidungen an denen du arbeitest.]
+Keine offenen Punkte.
