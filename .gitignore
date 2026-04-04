@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+._*
+
+# Outputs - Verzeichnis behalten, Inhalte ignorieren
+outputs/*
+!outputs/.gitkeep
+
+# Reference - Verzeichnis behalten, Inhalte ignorieren
+reference/*
+!reference/.gitkeep
+
+# Sensible Dateien
+*.env
+.env.*
+credentials.*
+secrets.*
+*.pem
+*.key
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
