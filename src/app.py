@@ -253,6 +253,8 @@ class AudioTranskriptApp(rumps.App):
         self.panel.on_text_edited = self._on_text_edited
         self._recording_start = None
         self._recording_timer = None
+        self._live_transcription_timer = None
+        self._is_transcribing_chunk = False
         self.menu = [
             rumps.MenuItem("Öffnen/Schließen", callback=self._toggle_panel),
             None,
@@ -316,6 +318,10 @@ class AudioTranskriptApp(rumps.App):
     def _toggle_recording(self):
         self._previous_app = get_frontmost_app()
         if self.recorder.is_recording:
+            if self._live_transcription_timer:
+                self._live_transcription_timer.stop()
+                self._live_transcription_timer = None
+            self._is_transcribing_chunk = False
             if self._recording_timer:
                 self._recording_timer.stop()
                 self._recording_timer = None
@@ -337,12 +343,33 @@ class AudioTranskriptApp(rumps.App):
             self.panel.set_status("Aufnahme läuft...")
             self._recording_timer = rumps.Timer(self._update_recording_time, 1)
             self._recording_timer.start()
+            self._live_transcription_timer = rumps.Timer(self._transcribe_live_chunk, 3)
+            self._live_transcription_timer.start()
 
     def _update_recording_time(self, _):
         if self._recording_start and self.recorder.is_recording:
             elapsed = _time.time() - self._recording_start
             mins, secs = divmod(int(elapsed), 60)
             self.panel.set_status(f"Aufnahme läuft... {mins:02d}:{secs:02d}")
+
+    def _transcribe_live_chunk(self, _):
+        """Alle 3 Sekunden den bisherigen Audio-Puffer transkribieren und im Textfeld anzeigen."""
+        if not self.recorder.is_recording or self._is_transcribing_chunk:
+            return
+        audio = self.recorder.get_audio_snapshot()
+        if len(audio) == 0:
+            return
+        self._is_transcribing_chunk = True
+
+        def _run():
+            text = self.transcriber.transcribe_quick(audio)
+            def _update():
+                self._is_transcribing_chunk = False
+                if text and self.recorder.is_recording:
+                    self.panel.set_text(text)
+            _on_main(_update)
+
+        threading.Thread(target=_run, daemon=True).start()
 
     def _on_model_loaded(self):
         self.panel.mic_btn.setEnabled_(True)
