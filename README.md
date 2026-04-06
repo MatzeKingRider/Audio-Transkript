@@ -16,9 +16,15 @@ Lokales macOS Menu-Bar-Tool fuer Sprach-Transkription und Screenshot-OCR. Laeuft
 ## Voraussetzungen
 
 - macOS 13+ (Ventura oder neuer)
-- Apple Silicon (M1/M2/M3/M4)
+- Apple Silicon (M1/M2/M3/M4) **oder** Intel Mac
 - Python 3.10+
-- ca. 4 GB RAM fuer das Whisper-Modell
+
+| Chip | Whisper-Backend | Modell | RAM-Bedarf |
+|------|----------------|--------|------------|
+| Apple Silicon | mlx-whisper | large-v3 | ca. 4 GB |
+| Intel | faster-whisper | medium | ca. 1.5 GB |
+
+Auf Intel-Macs ist die Transkription langsamer, aber funktional identisch.
 
 ## Installation
 
@@ -32,8 +38,9 @@ bash install.sh
 ```
 
 Das Script:
+- Erkennt automatisch ob Apple Silicon oder Intel
 - Erstellt eine Python-venv
-- Installiert alle Dependencies (mlx-whisper, rumps, pyobjc, etc.)
+- Installiert das passende Whisper-Backend (mlx-whisper oder faster-whisper)
 - Baut die macOS-App mit py2app
 - Installiert nach `/Applications/Audio Transkript.app`
 - Registriert als Login-Item (Auto-Start)

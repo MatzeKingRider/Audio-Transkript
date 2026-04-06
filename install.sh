@@ -14,14 +14,9 @@ fi
 PY_VERSION=$($PYTHON -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')")
 echo "Python: $PY_VERSION"
 
-# Pruefe Apple Silicon
+# Architektur erkennen
 ARCH=$(uname -m)
-if [ "$ARCH" != "arm64" ]; then
-    echo "WARNUNG: Dieses Tool ist fuer Apple Silicon optimiert (gefunden: $ARCH)"
-    echo "         mlx-whisper funktioniert nur auf Apple Silicon."
-    exit 1
-fi
-echo "Architektur: $ARCH (Apple Silicon)"
+echo "Architektur: $ARCH"
 
 # Virtual Environment erstellen
 echo ""
@@ -29,9 +24,20 @@ echo "Erstelle Virtual Environment..."
 $PYTHON -m venv .venv
 source .venv/bin/activate
 
-# Dependencies installieren
+# Basis-Dependencies installieren
 echo "Installiere Dependencies..."
 pip install -e . 2>&1 | tail -3
+
+# Whisper-Backend je nach Architektur
+if [ "$ARCH" = "arm64" ]; then
+    echo "Apple Silicon erkannt — installiere mlx-whisper..."
+    pip install "mlx-whisper" 2>&1 | tail -1
+else
+    echo "Intel erkannt — installiere faster-whisper..."
+    pip install "faster-whisper" 2>&1 | tail -1
+fi
+
+# py2app installieren
 pip install py2app 2>&1 | tail -1
 
 # App-Icon erstellen (falls noch nicht vorhanden)
@@ -56,6 +62,14 @@ bash build_app.sh
 
 echo ""
 echo "=== Installation abgeschlossen ==="
+echo ""
+echo "Architektur: $ARCH"
+if [ "$ARCH" = "arm64" ]; then
+    echo "Whisper-Backend: mlx-whisper (Apple Silicon, large-v3)"
+else
+    echo "Whisper-Backend: faster-whisper (Intel CPU, medium)"
+    echo "Hinweis: Transkription ist auf Intel langsamer als auf Apple Silicon."
+fi
 echo ""
 echo "Die App liegt unter: /Applications/Audio Transkript.app"
 echo "Sie startet automatisch beim naechsten Login."

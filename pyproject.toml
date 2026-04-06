@@ -1,18 +1,22 @@
 [project]
 name = "audio-transkript"
 version = "0.1.0"
-description = "Lokales macOS Menu-Bar-Tool für Sprach-Transkription und Screenshot-OCR"
+description = "Lokales macOS Menu-Bar-Tool fuer Sprach-Transkription und Screenshot-OCR"
 requires-python = ">=3.10"
 dependencies = [
     "rumps>=0.4.0",
     "pyobjc-framework-Cocoa",
     "pyobjc-framework-Quartz",
     "pyobjc-framework-Vision",
+    "pyobjc-framework-ApplicationServices",
     "sounddevice",
     "numpy",
-    "mlx-whisper",
     "pynput",
 ]
+
+[project.optional-dependencies]
+apple-silicon = ["mlx-whisper"]
+intel = ["faster-whisper"]
 
 [build-system]
 requires = ["setuptools>=68.0"]

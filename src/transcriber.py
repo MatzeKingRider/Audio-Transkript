@@ -1,18 +1,32 @@
-"""Whisper-Transkription mit mlx-whisper."""
+"""Whisper-Transkription — mlx-whisper (Apple Silicon) oder faster-whisper (Intel)."""
 
 import threading
 import numpy as np
-import mlx_whisper
-from src.config import WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_PROMPT, SAMPLE_RATE
+from src.config import (
+    WHISPER_BACKEND, WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_PROMPT, SAMPLE_RATE,
+)
+
+# Bekannte Whisper-Halluzinationen bei Stille/Rauschen
+HALLUCINATIONS = {
+    "vielen dank fürs zusehen",
+    "vielen dank fürs zuschauen",
+    "thank you for watching",
+    "thanks for watching",
+    "untertitel von",
+    "untertitelung",
+    "copyright",
+    "subtitles by",
+}
 
 
 class Transcriber:
-    """Lädt das Whisper-Modell und transkribiert Audio."""
+    """Laedt das Whisper-Modell und transkribiert Audio."""
 
     def __init__(self):
         self.model_loaded = False
         self._loading = False
         self._lock = threading.Lock()
+        self._model = None  # nur fuer faster-whisper
 
     def load_model(self, on_progress=None, on_done=None):
         """Modell im Hintergrund laden."""
@@ -24,11 +38,12 @@ class Transcriber:
             try:
                 if on_progress:
                     on_progress("Lade Whisper-Modell...")
-                # Dummy-Transkription erzwingt Modell-Download und -Laden
-                dummy = np.zeros(16000, dtype=np.float32)
-                mlx_whisper.transcribe(
-                    dummy, path_or_hf_repo=WHISPER_MODEL, language=WHISPER_LANGUAGE
-                )
+
+                if WHISPER_BACKEND == "mlx":
+                    self._load_mlx()
+                else:
+                    self._load_faster(on_progress)
+
                 self.model_loaded = True
                 if on_done:
                     on_done()
@@ -40,58 +55,72 @@ class Transcriber:
 
         threading.Thread(target=_load, daemon=True).start()
 
-    def transcribe(self, audio):
-        """Audio-Array transkribieren. Default: Deutsch, Fallback: Auto-Erkennung.
+    def _load_mlx(self):
+        import mlx_whisper
+        dummy = np.zeros(16000, dtype=np.float32)
+        mlx_whisper.transcribe(
+            dummy, path_or_hf_repo=WHISPER_MODEL, language=WHISPER_LANGUAGE
+        )
 
-        Erst mit language=de transkribieren. Falls das Ergebnis nach
-        Halluzination aussieht (bekannte Whisper-Artefakte bei Stille),
-        wird das Ergebnis verworfen.
-        """
+    def _load_faster(self, on_progress=None):
+        from faster_whisper import WhisperModel
+        if on_progress:
+            on_progress(f"Lade Whisper-Modell ({WHISPER_MODEL})...")
+        self._model = WhisperModel(
+            WHISPER_MODEL, device="cpu", compute_type="int8"
+        )
+
+    def transcribe(self, audio):
+        """Audio transkribieren. Gibt (text, language) zurueck."""
         if not self.model_loaded:
             return "", "?"
 
-        # Bekannte Whisper-Halluzinationen bei Stille/Rauschen
-        hallucinations = {
-            "vielen dank fürs zusehen",
-            "vielen dank fürs zuschauen",
-            "thank you for watching",
-            "thanks for watching",
-            "untertitel von",
-            "untertitelung",
-            "copyright",
-            "subtitles by",
-        }
-
         with self._lock:
-            result = mlx_whisper.transcribe(
-                audio,
-                path_or_hf_repo=WHISPER_MODEL,
-                language=WHISPER_LANGUAGE,
-                initial_prompt=WHISPER_PROMPT,
-                condition_on_previous_text=False,
-                no_speech_threshold=0.6,
-            )
-        text = result.get("text", "").strip()
+            if WHISPER_BACKEND == "mlx":
+                text = self._transcribe_mlx(audio)
+            else:
+                text = self._transcribe_faster(audio)
 
-        # Halluzinationen filtern
-        if text.lower().rstrip(".!") in hallucinations:
+        if text.lower().rstrip(".!") in HALLUCINATIONS:
             return "", "de"
 
         return text, "de"
 
+    def _transcribe_mlx(self, audio):
+        import mlx_whisper
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=WHISPER_MODEL,
+            language=WHISPER_LANGUAGE,
+            initial_prompt=WHISPER_PROMPT,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.6,
+        )
+        return result.get("text", "").strip()
+
+    def _transcribe_faster(self, audio):
+        segments, _info = self._model.transcribe(
+            audio,
+            language=WHISPER_LANGUAGE,
+            initial_prompt=WHISPER_PROMPT,
+            condition_on_previous_text=False,
+            no_speech_threshold=0.6,
+            beam_size=5,
+        )
+        return " ".join(seg.text.strip() for seg in segments).strip()
+
     def transcribe_quick(self, audio):
-        """Schnelle Zwischen-Transkription für Live-Preview."""
+        """Schnelle Zwischen-Transkription fuer Live-Preview."""
         if not self.model_loaded:
             return ""
         if len(audio) < SAMPLE_RATE:
             return ""
-        # Non-blocking: wenn gerade eine andere Transkription läuft, überspringen
         if not self._lock.acquire(blocking=False):
             return ""
         try:
-            result = mlx_whisper.transcribe(
-                audio, path_or_hf_repo=WHISPER_MODEL, language=WHISPER_LANGUAGE, initial_prompt=WHISPER_PROMPT
-            )
-            return result.get("text", "").strip()
+            if WHISPER_BACKEND == "mlx":
+                return self._transcribe_mlx(audio)
+            else:
+                return self._transcribe_faster(audio)
         finally:
             self._lock.release()
