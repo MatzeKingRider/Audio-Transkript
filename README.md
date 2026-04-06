@@ -1,52 +1,117 @@
-# Claude Starter Workspace
+# Audio Transkript
 
-Ein fertiges Workspace-Template für Claude Code. Gibt Claude strukturierten Kontext, damit er versteht wer du bist und woran du arbeitest — über Sessions hinweg.
+Lokales macOS Menu-Bar-Tool fuer Sprach-Transkription und Screenshot-OCR. Laeuft komplett offline auf Apple Silicon mit mlx-whisper.
 
-## Setup
+## Features
 
-1. Fülle die Dateien in `context/` mit deinen Informationen aus:
-   - `business-info.md` — dein Unternehmen oder Business
-   - `personal-info.md` — deine Rolle und Verantwortlichkeiten
-   - `strategy.md` — deine aktuellen Prioritäten und Ziele
-   - `current-data.md` — wichtige Kennzahlen und aktueller Stand
-2. Öffne diesen Ordner in Claude Code
-3. Starte jede Session mit `/prime`
+- **Sprach-Transkription** mit Whisper Large V3 (lokal, kein Internet)
+- **Automatische Spracherkennung** (Deutsch bevorzugt, erkennt andere Sprachen automatisch)
+- **Screenshot-OCR** mit macOS Vision API (Deutsch + Englisch)
+- **Auto-Insert** — transkribierter Text wird direkt ins aktive Eingabefeld eingefuegt
+- **Blockweise Uebertragung** bei langen Aufnahmen (alle 10 Sek.)
+- **Globale Hotkeys** (Cmd+Shift+T = Mikrofon, Cmd+Shift+O = Screenshot)
+- **Floating Panel** mit Textfeld, Kopieren, Einfuegen, Leeren
+- **Auto-Start** beim Mac-Login
 
-## Struktur
+## Voraussetzungen
+
+- macOS 13+ (Ventura oder neuer)
+- Apple Silicon (M1/M2/M3/M4)
+- Python 3.10+
+- ca. 4 GB RAM fuer das Whisper-Modell
+
+## Installation
+
+```bash
+# 1. Repository klonen
+git clone https://github.com/MatzeKingRider/Audio-Transkript.git
+cd Audio-Transkript
+
+# 2. Alles installieren (venv + Dependencies + App bauen)
+bash install.sh
+```
+
+Das Script:
+- Erstellt eine Python-venv
+- Installiert alle Dependencies (mlx-whisper, rumps, pyobjc, etc.)
+- Baut die macOS-App mit py2app
+- Installiert nach `/Applications/Audio Transkript.app`
+- Registriert als Login-Item (Auto-Start)
+
+## Manuelle Installation (Schritt fuer Schritt)
+
+```bash
+# venv erstellen
+python3 -m venv .venv
+source .venv/bin/activate
+
+# Dependencies installieren
+pip install -e .
+pip install py2app
+
+# App bauen
+bash build_app.sh
+```
+
+## Nach der Installation
+
+Beim ersten Start fragt macOS nach Berechtigungen. Alle drei muessen erteilt werden:
+
+| Berechtigung | Wo | Wofuer |
+|---|---|---|
+| **Bedienungshilfen** | Datenschutz & Sicherheit → Bedienungshilfen | Hotkeys + Text einfuegen |
+| **Mikrofon** | Datenschutz & Sicherheit → Mikrofon | Audioaufnahme |
+| **Bildschirmaufnahme** | Datenschutz & Sicherheit → Bildschirmaufnahme | Screenshot-OCR |
+
+**Wichtig:** Falls die App nach einem Update nicht mehr einfuegt oder Screenshots nicht funktionieren:
+```bash
+# Berechtigungen zuruecksetzen (macOS merkt sich die alte Binary)
+tccutil reset Accessibility com.matze.audio-transkript
+tccutil reset ScreenCapture com.matze.audio-transkript
+# Dann App neu starten und Berechtigungen erneut erteilen
+```
+
+## Benutzung
+
+| Aktion | Hotkey | Button |
+|---|---|---|
+| Mikrofon Start/Stop | Cmd+Shift+T | Blauer Mikrofon-Button |
+| Screenshot-OCR | Cmd+Shift+O | Oranger Kamera-Button |
+
+### Ablauf Sprach-Transkription
+1. Klick ins Ziel-Eingabefeld (z.B. Notizen, Browser, Texteditor)
+2. Cmd+Shift+T druecken → Aufnahme startet
+3. Sprechen (bei langen Texten wird alle 10 Sek. ein Block uebertragen)
+4. Cmd+Shift+T druecken → Aufnahme stoppt, letzter Block wird eingefuegt
+
+### Ablauf Screenshot-OCR
+1. Klick ins Ziel-Eingabefeld
+2. Cmd+Shift+O druecken → Fadenkreuz erscheint
+3. Bereich auswaehlen → Text wird erkannt und eingefuegt
+
+## Entwicklung
+
+```bash
+# App direkt aus dem Terminal starten (ohne Build)
+source .venv/bin/activate
+python -m src
+
+# Log-Datei pruefen
+cat $TMPDIR/audiotranskript.log
+```
+
+## Projektstruktur
 
 ```
-├── CLAUDE.md              # Anweisungen für Claude (wird automatisch geladen)
-├── .claude/commands/
-│   └── prime.md           # /prime Befehl — Session-Initialisierung
-├── context/               # Dein Hintergrundkontext (hier ausfüllen)
-├── outputs/               # Arbeitsergebnisse von Claude
-└── reference/             # Beispiel-Outputs, Inputmaterial, Vorlagen
+src/
+  app.py          — Menu-Bar-App, Panel-UI, Aufnahme-Steuerung
+  config.py       — Konstanten (Modell, Hotkeys, Panel-Groesse)
+  recorder.py     — Mikrofon-Aufnahme mit sounddevice
+  transcriber.py  — Whisper-Transkription mit mlx-whisper
+  ocr.py          — Screenshot + Vision-OCR
+  text_input.py   — Text einfuegen via Clipboard + Cmd+V
+  hotkeys.py      — Globale Tastenkuerzel mit pynput
+setup.py          — py2app-Konfiguration
+build_app.sh      — Baut die .app und installiert nach /Applications
+install.sh        — Komplette Installation (venv + App)
 ```
-
-## Nutzung
-
-Starte jede Session mit `/prime`. Claude liest deine Kontextdateien und bestätigt sein Verständnis bevor er arbeitet.
-
-Lege Material in `reference/` ab, das Claude als Input nutzen soll — Beispiel-Outputs, Dokumente zur Analyse, Vorlagen oder Muster. Claudes Arbeitsergebnisse landen in `outputs/`.
-
-## Verfügbare Skills
-
-Dieses Template ist optimiert für die Nutzung mit installierten Claude Code Skills:
-
-| Kategorie | Skills |
-|-----------|--------|
-| Planung | `/architecture`, `/requirements`, `/help` |
-| Entwicklung | `/backend`, `/frontend`, `/mobile` |
-| Qualität | `/qa`, `/critic`, `/fix-strike` |
-| Operations | `/deploy`, `/infrastructure` |
-| Kreativ | `/visualizer`, `/frontend-design` |
-| Workflow | `/commit`, `/skill-creator`, `superpowers` |
-
-Starte mit `/help` um zu sehen, welcher Skill als nächstes sinnvoll ist.
-
-## Als Template nutzen
-
-1. Repository klonen oder als GitHub Template verwenden
-2. `context/`-Dateien mit projektspezifischen Informationen füllen
-3. `outputs/` und `reference/` werden automatisch ignoriert (nur `.gitkeep` bleibt)
-4. Optional: Shell-Alias einrichten (siehe `shell-aliases.md`)

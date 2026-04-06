@@ -18,9 +18,20 @@ secrets.*
 *.pem
 *.key
 
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+
 # Editor/IDE
 .vscode/
 .idea/
 *.swp
 *.swo
 *~
+
+# Debug-Logs
+/tmp/audiotranskript*.log
