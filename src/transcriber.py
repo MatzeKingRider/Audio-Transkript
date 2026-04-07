@@ -133,8 +133,17 @@ class Transcriber:
         text = self._filter_hallucinations(text)
         if not text:
             return "", "de"
+        text = self._fix_spacing(text)
 
         return text, "de"
+
+    @staticmethod
+    def _fix_spacing(text):
+        """Stellt sicher, dass nach Satzzeichen ein Leerzeichen steht."""
+        import re
+        # Nach . ! ? : ; ein Leerzeichen einfuegen wenn direkt ein Buchstabe folgt
+        text = re.sub(r'([.!?;:,])([A-Za-zÄÖÜäöüß])', r'\1 \2', text)
+        return text
 
     @staticmethod
     def _filter_hallucinations(text):
