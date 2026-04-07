@@ -31,10 +31,13 @@ HALLUCINATION_EXACT = {
     "tschüss",
 }
 
-# Teilstrings — wenn einer davon im Text vorkommt, ist es Halluzination:
+# Teilstrings — wenn der GESAMTE Text nur daraus besteht, ist es Halluzination:
 HALLUCINATION_CONTAINS = [
     "vielen dank fürs",
+    "vielen dank für's",
+    "vielen dank fur",
     "danke fürs zu",
+    "danke für's zu",
     "danke für ihre aufmerksamkeit",
     "thank you for watching",
     "thanks for watching",
@@ -43,6 +46,25 @@ HALLUCINATION_CONTAINS = [
     "subtitles by",
     "sous-titres",
     "amara.org",
+]
+
+# Phrasen die am ENDE eines echten Textes angehaengt werden — werden abgeschnitten:
+HALLUCINATION_SUFFIXES = [
+    "vielen dank fürs zusehen",
+    "vielen dank für's zusehen",
+    "vielen dank fürs zuschauen",
+    "vielen dank für's zuschauen",
+    "vielen dank für ihre aufmerksamkeit",
+    "vielen dank",
+    "danke fürs zusehen",
+    "danke für's zusehen",
+    "danke fürs zuschauen",
+    "danke für's zuschauen",
+    "danke für ihre aufmerksamkeit",
+    "thank you for watching",
+    "thanks for watching",
+    "bis zum nächsten mal",
+    "bis zum nächsten video",
 ]
 
 
@@ -118,18 +140,23 @@ class Transcriber:
     def _filter_hallucinations(text):
         """Entfernt bekannte Whisper-Halluzinationen."""
         lower = text.lower().strip().rstrip(".!?")
-        # Exakter Match
+        # Exakter Match — gesamter Text ist Halluzination
         if lower in HALLUCINATION_EXACT:
             return ""
-        # Teilstring-Match
+        # Teilstring-Match — gesamter Text ist Halluzination
         for pattern in HALLUCINATION_CONTAINS:
             if pattern in lower:
                 return ""
+        # Suffix-Match — Halluzination am Ende eines echten Textes abschneiden
+        for suffix in HALLUCINATION_SUFFIXES:
+            idx = lower.rfind(suffix)
+            if idx > 0:
+                text = text[:idx].rstrip(" .,;!?-")
         # Sehr kurzer Text mit nur Satzzeichen/Whitespace
-        cleaned = lower.replace(".", "").replace(",", "").strip()
+        cleaned = text.replace(".", "").replace(",", "").strip()
         if len(cleaned) < 3:
             return ""
-        return text
+        return text.strip()
 
     def _transcribe_mlx(self, audio):
         import mlx_whisper
@@ -138,7 +165,7 @@ class Transcriber:
             path_or_hf_repo=WHISPER_MODEL,
             language=WHISPER_LANGUAGE,
             initial_prompt=WHISPER_PROMPT,
-            condition_on_previous_text=False,
+            condition_on_previous_text=True,
             no_speech_threshold=0.6,
         )
         return result.get("text", "").strip()
@@ -148,7 +175,7 @@ class Transcriber:
             audio,
             language=WHISPER_LANGUAGE,
             initial_prompt=WHISPER_PROMPT,
-            condition_on_previous_text=False,
+            condition_on_previous_text=True,
             no_speech_threshold=0.6,
             beam_size=5,
         )
