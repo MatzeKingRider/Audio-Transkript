@@ -2,8 +2,10 @@
 
 import threading
 import numpy as np
+import re
 from src.config import (
-    WHISPER_BACKEND, WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_PROMPT, SAMPLE_RATE,
+    WHISPER_BACKEND, WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_PROMPT,
+    SAMPLE_RATE, WORD_CORRECTIONS,
 )
 
 # Whisper halluziniert diese Phrasen bei Stille, Rauschen oder Aufnahme-Ende.
@@ -46,6 +48,8 @@ HALLUCINATION_CONTAINS = [
     "subtitles by",
     "sous-titres",
     "amara.org",
+    "sortimentskasten. key-account",
+    "systemhöhe 55, systemhöhe 80",
 ]
 
 # Phrasen die am ENDE eines echten Textes angehaengt werden — werden abgeschnitten:
@@ -65,6 +69,10 @@ HALLUCINATION_SUFFIXES = [
     "thanks for watching",
     "bis zum nächsten mal",
     "bis zum nächsten video",
+    "raaco boxxser, carrylite",
+    "raaco ist ein",
+    "sortimentskasten",
+    "key-account-manager",
 ]
 
 
@@ -139,10 +147,12 @@ class Transcriber:
 
     @staticmethod
     def _fix_spacing(text):
-        """Stellt sicher, dass nach Satzzeichen ein Leerzeichen steht."""
-        import re
-        # Nach . ! ? : ; ein Leerzeichen einfuegen wenn direkt ein Buchstabe folgt
+        """Nachbearbeitung: Leerzeichen nach Satzzeichen, Wort-Korrekturen."""
+        # Leerzeichen nach Satzzeichen
         text = re.sub(r'([.!?;:,])([A-Za-zÄÖÜäöüß])', r'\1 \2', text)
+        # Wort-Korrekturen (case-insensitive ersetzen)
+        for wrong, right in WORD_CORRECTIONS.items():
+            text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
         return text
 
     @staticmethod
@@ -174,7 +184,7 @@ class Transcriber:
             path_or_hf_repo=WHISPER_MODEL,
             language=WHISPER_LANGUAGE,
             initial_prompt=WHISPER_PROMPT,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,
             no_speech_threshold=0.6,
         )
         return result.get("text", "").strip()
@@ -184,7 +194,7 @@ class Transcriber:
             audio,
             language=WHISPER_LANGUAGE,
             initial_prompt=WHISPER_PROMPT,
-            condition_on_previous_text=True,
+            condition_on_previous_text=False,
             no_speech_threshold=0.6,
             beam_size=5,
         )

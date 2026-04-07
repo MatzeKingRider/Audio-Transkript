@@ -34,14 +34,29 @@ HOTKEY_MIC = "<cmd>+<shift>+t"
 HOTKEY_OCR = "<cmd>+<shift>+o"
 
 # Whisper Initial Prompt — steuert Schreibweisen und Fachbegriffe.
-# Whisper nutzt diesen Text als Kontext fuer die Transkription.
-# Firmenspezifische Begriffe hier eintragen damit sie korrekt erkannt werden.
+# WICHTIG: Kurz halten! Lange Prompts werden von Whisper zurueck-halluziniert.
+# Format: Beispielsaetze mit korrekten Schreibweisen, KEIN erklaerrender Text.
 WHISPER_PROMPT = (
-    "Dies ist ein Transkript mit korrekter Gross- und Kleinschreibung sowie Satzzeichen. "
-    "raaco ist ein daenischer Hersteller von Sortiment- und Aufbewahrungssystemen. "
-    "raaco wird immer kleingeschrieben. "
-    "Weitere Begriffe: Key-Account-Manager, Sortimentskästen, CarryLite, Boxxser, HandyBox, AssorterPro."
+    "raaco Boxxser, CarryLite, HandyBox, AssorterPro, Sortimentskasten. "
+    "Key-Account-Manager, Systemhöhe 55, Systemhöhe 80."
 )
+
+# Woerter die immer in einer bestimmten Schreibweise erscheinen sollen.
+# Format: {falsch_lowercase: richtig}
+WORD_CORRECTIONS = {
+    "raco": "raaco",
+    "raaco": "raaco",   # Gross -> klein
+    "rako": "raaco",
+    "racko": "raaco",
+    "boxser": "Boxxser",
+    "boxxer": "Boxxser",
+    "carrylite": "CarryLite",
+    "carry lite": "CarryLite",
+    "handybox": "HandyBox",
+    "handy box": "HandyBox",
+    "assorterpro": "AssorterPro",
+    "assorter pro": "AssorterPro",
+}
 
 # OCR
 OCR_LANGUAGES = ["de-DE", "en-US"]
