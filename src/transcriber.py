@@ -48,8 +48,6 @@ HALLUCINATION_CONTAINS = [
     "subtitles by",
     "sous-titres",
     "amara.org",
-    "sortimentskasten. key-account",
-    "systemhöhe 55, systemhöhe 80",
 ]
 
 # Phrasen die am ENDE eines echten Textes angehaengt werden — werden abgeschnitten:
@@ -69,10 +67,8 @@ HALLUCINATION_SUFFIXES = [
     "thanks for watching",
     "bis zum nächsten mal",
     "bis zum nächsten video",
+    "raaco, boxxser, carrylite",
     "raaco boxxser, carrylite",
-    "raaco ist ein",
-    "sortimentskasten",
-    "key-account-manager",
 ]
 
 

@@ -33,13 +33,10 @@ CHANNELS = 1
 HOTKEY_MIC = "<cmd>+<shift>+t"
 HOTKEY_OCR = "<cmd>+<shift>+o"
 
-# Whisper Initial Prompt — steuert Schreibweisen und Fachbegriffe.
-# WICHTIG: Kurz halten! Lange Prompts werden von Whisper zurueck-halluziniert.
-# Format: Beispielsaetze mit korrekten Schreibweisen, KEIN erklaerrender Text.
-WHISPER_PROMPT = (
-    "raaco Boxxser, CarryLite, HandyBox, AssorterPro, Sortimentskasten. "
-    "Key-Account-Manager, Systemhöhe 55, Systemhöhe 80."
-)
+# Whisper Initial Prompt — steuert Schreibweisen.
+# ACHTUNG: Whisper halluziniert den Prompt zurueck wenn er zu lang ist.
+# Daher nur ein kurzer Beispielsatz mit den wichtigsten Schreibweisen.
+WHISPER_PROMPT = "raaco, Boxxser, CarryLite, HandyBox."
 
 # Woerter die immer in einer bestimmten Schreibweise erscheinen sollen.
 # Format: {falsch_lowercase: richtig}
