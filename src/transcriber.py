@@ -6,17 +6,44 @@ from src.config import (
     WHISPER_BACKEND, WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_PROMPT, SAMPLE_RATE,
 )
 
-# Bekannte Whisper-Halluzinationen bei Stille/Rauschen
-HALLUCINATIONS = {
+# Whisper halluziniert diese Phrasen bei Stille, Rauschen oder Aufnahme-Ende.
+# Exakte Matches (nach lowercase + strip von Satzzeichen):
+HALLUCINATION_EXACT = {
     "vielen dank fürs zusehen",
     "vielen dank fürs zuschauen",
+    "vielen dank für ihre aufmerksamkeit",
+    "vielen dank",
+    "danke fürs zusehen",
+    "danke fürs zuschauen",
+    "danke für ihre aufmerksamkeit",
+    "danke schön",
+    "thank you for watching",
+    "thanks for watching",
+    "thank you",
+    "untertitel von",
+    "untertitelung",
+    "untertitel der amara.org-community",
+    "copyright",
+    "subtitles by",
+    "sous-titrage",
+    "bis zum nächsten mal",
+    "bis zum nächsten video",
+    "tschüss",
+}
+
+# Teilstrings — wenn einer davon im Text vorkommt, ist es Halluzination:
+HALLUCINATION_CONTAINS = [
+    "vielen dank fürs",
+    "danke fürs zu",
+    "danke für ihre aufmerksamkeit",
     "thank you for watching",
     "thanks for watching",
     "untertitel von",
-    "untertitelung",
-    "copyright",
+    "untertitel der",
     "subtitles by",
-}
+    "sous-titres",
+    "amara.org",
+]
 
 
 class Transcriber:
@@ -81,10 +108,28 @@ class Transcriber:
             else:
                 text = self._transcribe_faster(audio)
 
-        if text.lower().rstrip(".!") in HALLUCINATIONS:
+        text = self._filter_hallucinations(text)
+        if not text:
             return "", "de"
 
         return text, "de"
+
+    @staticmethod
+    def _filter_hallucinations(text):
+        """Entfernt bekannte Whisper-Halluzinationen."""
+        lower = text.lower().strip().rstrip(".!?")
+        # Exakter Match
+        if lower in HALLUCINATION_EXACT:
+            return ""
+        # Teilstring-Match
+        for pattern in HALLUCINATION_CONTAINS:
+            if pattern in lower:
+                return ""
+        # Sehr kurzer Text mit nur Satzzeichen/Whitespace
+        cleaned = lower.replace(".", "").replace(",", "").strip()
+        if len(cleaned) < 3:
+            return ""
+        return text
 
     def _transcribe_mlx(self, audio):
         import mlx_whisper

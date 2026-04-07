@@ -33,8 +33,15 @@ CHANNELS = 1
 HOTKEY_MIC = "<cmd>+<shift>+t"
 HOTKEY_OCR = "<cmd>+<shift>+o"
 
-# Whisper Initial Prompt — hilft bei Gross-/Kleinschreibung und Satzzeichen
-WHISPER_PROMPT = "Hallo, das ist ein Transkript. Bitte achte auf korrekte Gross- und Kleinschreibung sowie Satzzeichen."
+# Whisper Initial Prompt — steuert Schreibweisen und Fachbegriffe.
+# Whisper nutzt diesen Text als Kontext fuer die Transkription.
+# Firmenspezifische Begriffe hier eintragen damit sie korrekt erkannt werden.
+WHISPER_PROMPT = (
+    "Dies ist ein Transkript mit korrekter Gross- und Kleinschreibung sowie Satzzeichen. "
+    "raaco ist ein daenischer Hersteller von Sortiment- und Aufbewahrungssystemen. "
+    "raaco wird immer kleingeschrieben. "
+    "Weitere Begriffe: Key-Account-Manager, Sortimentskästen, CarryLite, Boxxser, HandyBox, AssorterPro."
+)
 
 # OCR
 OCR_LANGUAGES = ["de-DE", "en-US"]
