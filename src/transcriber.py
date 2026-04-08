@@ -128,6 +128,15 @@ class Transcriber:
         if not self.model_loaded:
             return "", "?"
 
+        # Zu kurzes Audio ignorieren (< 1.5 Sek. = Halluzinationsrisiko)
+        if len(audio) < int(SAMPLE_RATE * 1.5):
+            return "", "de"
+
+        # Stille am Ende trimmen (reduziert Halluzinationen massiv)
+        audio = self._trim_silence(audio)
+        if len(audio) < SAMPLE_RATE:
+            return "", "de"
+
         with self._lock:
             if WHISPER_BACKEND == "mlx":
                 text = self._transcribe_mlx(audio)
@@ -173,6 +182,26 @@ class Transcriber:
             return ""
         return text.strip()
 
+    @staticmethod
+    def _trim_silence(audio, threshold=0.01):
+        """Stille am Ende des Audio-Arrays entfernen.
+
+        Whisper halluziniert wenn am Ende Stille ist.
+        """
+        # Von hinten nach vorn: erstes Sample ueber Schwelle finden
+        abs_audio = np.abs(audio)
+        # In 160-Sample-Bloecken (10ms) pruefen
+        block_size = 160
+        n_blocks = len(abs_audio) // block_size
+        for i in range(n_blocks - 1, -1, -1):
+            block = abs_audio[i * block_size:(i + 1) * block_size]
+            if np.max(block) > threshold:
+                # 0.3 Sek. Puffer nach letztem Ton lassen
+                end = min(len(audio), (i + 1) * block_size + int(
+                    SAMPLE_RATE * 0.3))
+                return audio[:end]
+        return audio
+
     def _transcribe_mlx(self, audio):
         import mlx_whisper
         result = mlx_whisper.transcribe(
@@ -181,7 +210,8 @@ class Transcriber:
             language=WHISPER_LANGUAGE,
             initial_prompt=WHISPER_PROMPT,
             condition_on_previous_text=False,
-            no_speech_threshold=0.6,
+            no_speech_threshold=0.4,
+            compression_ratio_threshold=2.0,
         )
         return result.get("text", "").strip()
 
@@ -191,7 +221,8 @@ class Transcriber:
             language=WHISPER_LANGUAGE,
             initial_prompt=WHISPER_PROMPT,
             condition_on_previous_text=False,
-            no_speech_threshold=0.6,
+            no_speech_threshold=0.4,
+            compression_ratio_threshold=2.0,
             beam_size=5,
         )
         return " ".join(seg.text.strip() for seg in segments).strip()

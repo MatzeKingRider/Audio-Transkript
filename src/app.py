@@ -33,6 +33,7 @@ from AppKit import (
     NSFloatingWindowLevel,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
+    NSWindowStyleMaskResizable,
     NSWindowStyleMaskUtilityWindow,
     NSBackingStoreBuffered,
     NSBezelStyleRounded,
@@ -158,6 +159,7 @@ class TranscriptPanel(NSObject):
         style = (
             NSWindowStyleMaskTitled
             | NSWindowStyleMaskClosable
+            | NSWindowStyleMaskResizable
             | NSWindowStyleMaskUtilityWindow
         )
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
@@ -542,7 +544,7 @@ class AudioTranskriptApp(rumps.App):
         self._recording_timer = rumps.Timer(
             self._update_recording_time, 1)
         self._recording_timer.start()
-        self._chunk_timer = rumps.Timer(self._transcribe_chunk, 10)
+        self._chunk_timer = rumps.Timer(self._transcribe_chunk, 15)
         self._chunk_timer.start()
 
     def _stop_recording(self):

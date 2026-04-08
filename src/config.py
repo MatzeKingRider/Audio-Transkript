@@ -7,8 +7,8 @@ APP_NAME = "AudioTranskript"
 ICON_PATH = "assets/iconTemplate.png"
 
 # Panel
-PANEL_WIDTH = 420
-PANEL_HEIGHT = 400
+PANEL_WIDTH = 520
+PANEL_HEIGHT = 440
 PANEL_TITLE = "Audio Transkript"
 
 # Architektur-Erkennung
