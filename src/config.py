@@ -29,9 +29,10 @@ WHISPER_LANGUAGE = "de"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
-# Hotkeys
-HOTKEY_MIC = "<cmd>+<shift>+t"
-HOTKEY_OCR = "<cmd>+<shift>+o"
+# Hotkeys — F-Tasten (F17-F19)
+HOTKEY_MIC_TOGGLE = "<f18>"   # Toggle: Start/Stop (einmal druecken)
+HOTKEY_OCR = "<f17>"          # Screenshot-OCR
+# F19 = Push-to-Talk (halten = Aufnahme, loslassen = Stopp) — in hotkeys.py
 
 # Whisper Initial Prompt — steuert Schreibweisen.
 # ACHTUNG: Whisper halluziniert den Prompt zurueck wenn er zu lang ist.

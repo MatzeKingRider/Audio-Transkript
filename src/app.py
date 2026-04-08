@@ -45,7 +45,7 @@ from AppKit import (
 from PyObjCTools import AppHelper
 from src.config import (
     APP_NAME, ICON_PATH, PANEL_WIDTH, PANEL_HEIGHT, PANEL_TITLE,
-    HOTKEY_MIC, HOTKEY_OCR, SAMPLE_RATE,
+    HOTKEY_MIC_TOGGLE, HOTKEY_OCR, SAMPLE_RATE,
 )
 from src.recorder import Recorder
 from src.transcriber import Transcriber
@@ -55,21 +55,20 @@ from src.hotkeys import HotkeyManager
 
 
 def _on_main(fn):
-    """Führt fn auf dem Main-Thread aus (sicher von Hintergrund-Threads)."""
+    """Fuehrt fn auf dem Main-Thread aus (sicher von Hintergrund-Threads)."""
     AppHelper.callAfter(fn)
 
 
 # --- Icon-Zeichnung ---
 
 def _make_circle_icon(size, bg_color, draw_fn):
-    """Erzeugt ein rundes NSImage mit farbigem Hintergrund und benutzerdefiniertem Symbol."""
+    """Erzeugt ein rundes NSImage mit farbigem Hintergrund und Symbol."""
     img = NSImage.alloc().initWithSize_(NSMakeSize(size, size))
     img.lockFocus()
-    # Kreis-Hintergrund
     bg_color.setFill()
-    circle = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(0, 0, size, size))
+    circle = NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(0, 0, size, size))
     circle.fill()
-    # Symbol zeichnen
     NSColor.whiteColor().setFill()
     NSColor.whiteColor().setStroke()
     draw_fn(size)
@@ -78,29 +77,23 @@ def _make_circle_icon(size, bg_color, draw_fn):
 
 
 def _draw_mic(size):
-    """Mikrofon-Symbol: Kapsel oben, Stiel unten, Bogen."""
+    """Mikrofon-Symbol."""
     cx = size / 2
-    # Kapsel (Mikrofon-Kopf)
     kw, kh = size * 0.22, size * 0.32
     kapsel = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        NSMakeRect(cx - kw / 2, size * 0.42, kw, kh), kw / 2, kw / 2
-    )
+        NSMakeRect(cx - kw / 2, size * 0.42, kw, kh), kw / 2, kw / 2)
     kapsel.fill()
-    # Bogen unter dem Mikrofon
     bogen = NSBezierPath.bezierPath()
     bogen.setLineWidth_(size * 0.045)
     bw = size * 0.34
     bogen.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-        (cx, size * 0.46), bw / 2, 210, 330, True
-    )
+        (cx, size * 0.46), bw / 2, 210, 330, True)
     bogen.stroke()
-    # Stiel
     stiel = NSBezierPath.bezierPath()
     stiel.setLineWidth_(size * 0.045)
     stiel.moveToPoint_((cx, size * 0.30))
     stiel.lineToPoint_((cx, size * 0.20))
     stiel.stroke()
-    # Fuss
     fuss = NSBezierPath.bezierPath()
     fuss.setLineWidth_(size * 0.045)
     fuss.moveToPoint_((cx - size * 0.10, size * 0.20))
@@ -109,16 +102,13 @@ def _draw_mic(size):
 
 
 def _draw_camera(size):
-    """Kamera-Symbol: Rechteck mit Linse."""
+    """Kamera-Symbol."""
     cx, cy = size / 2, size / 2
-    # Kamera-Koerper
     bw, bh = size * 0.50, size * 0.34
     body = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
         NSMakeRect(cx - bw / 2, cy - bh / 2 - size * 0.02, bw, bh),
-        size * 0.04, size * 0.04,
-    )
+        size * 0.04, size * 0.04)
     body.fill()
-    # Blitz/Sucher oben
     top = NSBezierPath.bezierPath()
     top.moveToPoint_((cx - size * 0.08, cy + bh / 2 - size * 0.02))
     top.lineToPoint_((cx - size * 0.05, cy + bh / 2 + size * 0.06))
@@ -126,29 +116,25 @@ def _draw_camera(size):
     top.lineToPoint_((cx + size * 0.08, cy + bh / 2 - size * 0.02))
     top.closePath()
     top.fill()
-    # Linse (Kreis ausschneiden, dann Ring zeichnen)
     NSColor.whiteColor().setStroke()
     lens_r = size * 0.11
     lens = NSBezierPath.bezierPathWithOvalInRect_(
-        NSMakeRect(cx - lens_r, cy - lens_r - size * 0.02, lens_r * 2, lens_r * 2)
-    )
-    # Innerer Kreis dunkel (Hintergrundfarbe)
+        NSMakeRect(cx - lens_r, cy - lens_r - size * 0.02,
+                   lens_r * 2, lens_r * 2))
     NSColor.systemOrangeColor().setFill()
     lens.fill()
-    # Ring weiss
     NSColor.whiteColor().setStroke()
     lens.setLineWidth_(size * 0.03)
     lens.stroke()
 
 
 def _draw_stop(size):
-    """Stopp-Symbol: Abgerundetes Quadrat."""
+    """Stopp-Symbol."""
     cx, cy = size / 2, size / 2
     sq = size * 0.28
     stop_rect = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
         NSMakeRect(cx - sq / 2, cy - sq / 2, sq, sq),
-        size * 0.04, size * 0.04,
-    )
+        size * 0.04, size * 0.04)
     stop_rect.fill()
 
 
@@ -176,10 +162,7 @@ class TranscriptPanel(NSObject):
         )
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT),
-            style,
-            NSBackingStoreBuffered,
-            False,
-        )
+            style, NSBackingStoreBuffered, False)
         self.panel.setTitle_(PANEL_TITLE)
         self.panel.setLevel_(NSFloatingWindowLevel)
         self.panel.setHidesOnDeactivate_(False)
@@ -194,10 +177,6 @@ class TranscriptPanel(NSObject):
         pad = 20
         inner_w = PANEL_WIDTH - 2 * pad
 
-        # --- Shortcut-Beschriftungen fuer Menschen lesbar ---
-        mic_shortcut = HOTKEY_MIC.replace("<cmd>", "\u2318").replace("<shift>", "\u21E7").replace("+", "").upper()
-        ocr_shortcut = HOTKEY_OCR.replace("<cmd>", "\u2318").replace("<shift>", "\u21E7").replace("+", "").upper()
-
         # --- Runde Buttons oben ---
         btn_size = 60
         gap = 40
@@ -207,19 +186,17 @@ class TranscriptPanel(NSObject):
         btn_y = 330
 
         self.mic_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(x_mic, btn_y, btn_size, btn_size)
-        )
+            NSMakeRect(x_mic, btn_y, btn_size, btn_size))
         self.mic_btn.setBordered_(False)
         self.mic_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-        self.mic_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
+        self.mic_btn.setImage_(
+            _make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
         self.mic_btn.setTarget_(self)
         self.mic_btn.setAction_("micClicked:")
         content.addSubview_(self.mic_btn)
 
-        # Label "Mikrofon" + Shortcut
         mic_label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_mic - 20, btn_y - 20, btn_size + 40, 16)
-        )
+            NSMakeRect(x_mic - 20, btn_y - 20, btn_size + 40, 16))
         mic_label.setStringValue_("Mikrofon")
         mic_label.setEditable_(False)
         mic_label.setBezeled_(False)
@@ -230,9 +207,8 @@ class TranscriptPanel(NSObject):
         content.addSubview_(mic_label)
 
         mic_hint = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_mic - 20, btn_y - 34, btn_size + 40, 14)
-        )
-        mic_hint.setStringValue_(mic_shortcut)
+            NSMakeRect(x_mic - 20, btn_y - 34, btn_size + 40, 14))
+        mic_hint.setStringValue_("F18 Toggle / F19 Halten")
         mic_hint.setEditable_(False)
         mic_hint.setBezeled_(False)
         mic_hint.setDrawsBackground_(False)
@@ -242,19 +218,18 @@ class TranscriptPanel(NSObject):
         content.addSubview_(mic_hint)
 
         self.ocr_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(x_ocr, btn_y, btn_size, btn_size)
-        )
+            NSMakeRect(x_ocr, btn_y, btn_size, btn_size))
         self.ocr_btn.setBordered_(False)
         self.ocr_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-        self.ocr_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemOrangeColor(), _draw_camera))
+        self.ocr_btn.setImage_(
+            _make_circle_icon(btn_size, NSColor.systemOrangeColor(),
+                              _draw_camera))
         self.ocr_btn.setTarget_(self)
         self.ocr_btn.setAction_("ocrClicked:")
         content.addSubview_(self.ocr_btn)
 
-        # Label "Screenshot" + Shortcut
         ocr_label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_ocr - 20, btn_y - 20, btn_size + 40, 16)
-        )
+            NSMakeRect(x_ocr - 20, btn_y - 20, btn_size + 40, 16))
         ocr_label.setStringValue_("Screenshot")
         ocr_label.setEditable_(False)
         ocr_label.setBezeled_(False)
@@ -265,9 +240,8 @@ class TranscriptPanel(NSObject):
         content.addSubview_(ocr_label)
 
         ocr_hint = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_ocr - 20, btn_y - 34, btn_size + 40, 14)
-        )
-        ocr_hint.setStringValue_(ocr_shortcut)
+            NSMakeRect(x_ocr - 20, btn_y - 34, btn_size + 40, 14))
+        ocr_hint.setStringValue_("F17")
         ocr_hint.setEditable_(False)
         ocr_hint.setBezeled_(False)
         ocr_hint.setDrawsBackground_(False)
@@ -276,11 +250,11 @@ class TranscriptPanel(NSObject):
         ocr_hint.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(ocr_hint)
 
-        # --- Editierbares Textfeld mit Scrollbar ---
+        # --- Textfeld ---
         scroll_frame = NSMakeRect(pad, 100, inner_w, 190)
         self.scroll_view = NSScrollView.alloc().initWithFrame_(scroll_frame)
         self.scroll_view.setHasVerticalScroller_(True)
-        self.scroll_view.setBorderType_(1)  # NSBezelBorder
+        self.scroll_view.setBorderType_(1)
 
         text_frame = NSMakeRect(0, 0, inner_w - 2, 190)
         self.text_view = NSTextView.alloc().initWithFrame_(text_frame)
@@ -290,15 +264,13 @@ class TranscriptPanel(NSObject):
         self.text_view.setFont_(NSFont.systemFontOfSize_(14))
         self.text_view.textContainer().setWidthTracksTextView_(True)
         self.text_view.setDelegate_(self)
-
         self.scroll_view.setDocumentView_(self.text_view)
         content.addSubview_(self.scroll_view)
 
-        # --- Untere Buttons: Kopieren, Einfügen, Leeren (y=55) ---
+        # --- Untere Buttons ---
         btn_w = (inner_w - 20) // 3
         self.copy_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(pad, 55, btn_w, 32)
-        )
+            NSMakeRect(pad, 55, btn_w, 32))
         self.copy_btn.setTitle_("Kopieren")
         self.copy_btn.setBezelStyle_(NSBezelStyleRounded)
         self.copy_btn.setTarget_(self)
@@ -306,27 +278,24 @@ class TranscriptPanel(NSObject):
         content.addSubview_(self.copy_btn)
 
         self.insert_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(pad + btn_w + 10, 55, btn_w, 32)
-        )
-        self.insert_btn.setTitle_("Einfügen")
+            NSMakeRect(pad + btn_w + 10, 55, btn_w, 32))
+        self.insert_btn.setTitle_("Einfuegen")
         self.insert_btn.setBezelStyle_(NSBezelStyleRounded)
         self.insert_btn.setTarget_(self)
         self.insert_btn.setAction_("insertClicked:")
         content.addSubview_(self.insert_btn)
 
         self.clear_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(pad + 2 * (btn_w + 10), 55, btn_w, 32)
-        )
+            NSMakeRect(pad + 2 * (btn_w + 10), 55, btn_w, 32))
         self.clear_btn.setTitle_("Leeren")
         self.clear_btn.setBezelStyle_(NSBezelStyleRounded)
         self.clear_btn.setTarget_(self)
         self.clear_btn.setAction_("clearClicked:")
         content.addSubview_(self.clear_btn)
 
-        # --- Status-Label (y=15) ---
+        # --- Status-Label ---
         self.status_label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(pad, 15, inner_w, 30)
-        )
+            NSMakeRect(pad, 15, inner_w, 30))
         self.status_label.setStringValue_("Bereit")
         self.status_label.setEditable_(False)
         self.status_label.setBezeled_(False)
@@ -338,9 +307,11 @@ class TranscriptPanel(NSObject):
     @objc.python_method
     def set_mic_icon(self, recording=False):
         if recording:
-            self.mic_btn.setImage_(_make_circle_icon(60, NSColor.systemRedColor(), _draw_stop))
+            self.mic_btn.setImage_(
+                _make_circle_icon(60, NSColor.systemRedColor(), _draw_stop))
         else:
-            self.mic_btn.setImage_(_make_circle_icon(60, NSColor.systemBlueColor(), _draw_mic))
+            self.mic_btn.setImage_(
+                _make_circle_icon(60, NSColor.systemBlueColor(), _draw_mic))
 
     @objc.python_method
     def set_status(self, text):
@@ -363,7 +334,6 @@ class TranscriptPanel(NSObject):
         if current and not current.endswith("\n"):
             text = "\n" + text
         self.text_view.setString_(current + text)
-        # Scroll zum Ende
         length = self.text_view.string().length()
         self.text_view.scrollRangeToVisible_((length, 0))
         self._programmatic_text_change = False
@@ -426,15 +396,18 @@ class AppActivationObserver(NSObject):
         self._last_external_app = None
         ws = NSWorkspace.sharedWorkspace()
         ws.notificationCenter().addObserver_selector_name_object_(
-            self, "appDidActivate:", NSWorkspaceDidActivateApplicationNotification, None
-        )
+            self, "appDidActivate:",
+            NSWorkspaceDidActivateApplicationNotification, None)
         return self
 
     def appDidActivate_(self, notification):
-        app = notification.userInfo()["NSWorkspaceApplicationKey"]
-        bundle_id = app.bundleIdentifier()
-        if bundle_id and bundle_id != self._own_bundle_id:
-            self._last_external_app = app
+        try:
+            app = notification.userInfo()["NSWorkspaceApplicationKey"]
+            bundle_id = app.bundleIdentifier()
+            if bundle_id and bundle_id != self._own_bundle_id:
+                self._last_external_app = app
+        except Exception:
+            pass
 
     @objc.python_method
     def last_external_app(self):
@@ -462,28 +435,29 @@ class AudioTranskriptApp(rumps.App):
         self._chunk_timer = None
         self._is_transcribing_chunk = False
         self.menu = [
-            rumps.MenuItem("Öffnen/Schließen", callback=self._toggle_panel),
+            rumps.MenuItem("Oeffnen/Schliessen",
+                           callback=self._toggle_panel),
             None,
             rumps.MenuItem("Beenden", callback=self._quit),
         ]
 
-        # App-Wechsel beobachten (merkt sich letzte externe App)
         self._app_observer = AppActivationObserver.alloc().init().setup(
-            "com.matze.audio-transkript"
-        )
+            "com.matze.audio-transkript")
 
-        # Globale Hotkeys starten
+        # Hotkeys: F17=OCR, F18=Toggle, F19=Push-to-Talk
         self.hotkeys = HotkeyManager(
             on_mic_toggle=self._toggle_recording,
+            on_mic_ptt_start=self._start_ptt_recording,
+            on_mic_ptt_stop=self._stop_ptt_recording,
             on_ocr_trigger=self._do_screenshot_ocr,
         )
         self.hotkeys.start()
         log.info("Hotkeys und Observer eingerichtet")
 
-        # Whisper-Modell im Hintergrund laden
         self.panel.mic_btn.setEnabled_(False)
         self.transcriber.load_model(
-            on_progress=lambda msg: _on_main(lambda: self.panel.set_status(msg)),
+            on_progress=lambda msg: _on_main(
+                lambda: self.panel.set_status(msg)),
             on_done=lambda: _on_main(self._on_model_loaded),
         )
 
@@ -501,6 +475,27 @@ class AudioTranskriptApp(rumps.App):
     def _on_text_edited(self):
         self._text_was_edited = True
 
+    # --- Hilfsfunktion: Text in Ziel-App einfuegen (nie Main-Thread blockieren) ---
+
+    def _insert_in_target(self, text):
+        """Text in Ziel-App einfuegen — im Hintergrund-Thread."""
+        target = self._app_observer.last_external_app()
+        if not target:
+            return
+
+        def _run():
+            try:
+                activate_app(target)
+                _time.sleep(0.15)
+                type_text(text)
+                log.info("Text eingefuegt (%d Zeichen)", len(text))
+            except Exception as e:
+                log.exception("Fehler beim Einfuegen: %s", e)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    # --- Aktionen ---
+
     def _copy_text(self):
         text = self.panel.get_text()
         if not text.strip():
@@ -514,85 +509,121 @@ class AudioTranskriptApp(rumps.App):
     def _insert_panel_text(self):
         text = self.panel.get_text()
         if not text.strip():
-            self.panel.set_status("Kein Text zum Einfügen")
+            self.panel.set_status("Kein Text zum Einfuegen")
             return
-        target = self._app_observer.last_external_app()
-        if target:
-            activate_app(target)
-            _time.sleep(0.15)
-        type_text(text)
-        self.panel.set_status("Text eingefügt")
+        self._insert_in_target(text)
+        self.panel.set_status("Text eingefuegt")
 
     def _clear_text(self):
         self.panel.set_text("")
         self._text_was_edited = False
         self.panel.set_status("Bereit")
 
+    # --- Aufnahme: Toggle-Modus (F18 / Button) ---
+
     def _toggle_recording(self):
-        log.info("_toggle_recording: is_recording=%s", self.recorder.is_recording)
+        log.info("_toggle_recording: is_recording=%s",
+                 self.recorder.is_recording)
         if self.recorder.is_recording:
-            if self._chunk_timer:
-                self._chunk_timer.stop()
-                self._chunk_timer = None
-            self._is_transcribing_chunk = False
-            if self._recording_timer:
-                self._recording_timer.stop()
-                self._recording_timer = None
-            self.panel.set_mic_icon(recording=False)
-            # Letzten Rest transkribieren
-            audio = self.recorder.stop()
-            log.info("recorder.stop: audio len=%d", len(audio))
-            if len(audio) > 0:
-                self.panel.set_status("Letzten Abschnitt verarbeiten...")
-                self._process_final_chunk(audio)
-            elif not self.panel.get_text().strip():
-                self.panel.set_status("Keine Aufnahme erkannt")
-            else:
-                self.panel.set_status("Bereit")
+            self._stop_recording()
         else:
-            if not self._text_was_edited:
-                self.panel.set_text("")
-            self.recorder.start()
-            self._recording_start = _time.time()
-            self.panel.set_mic_icon(recording=True)
-            self.panel.set_status("Aufnahme laeuft...")
-            self._recording_timer = rumps.Timer(self._update_recording_time, 1)
-            self._recording_timer.start()
-            self._chunk_timer = rumps.Timer(self._transcribe_chunk, 10)
-            self._chunk_timer.start()
+            self._start_recording()
+
+    def _start_recording(self):
+        """Aufnahme starten (gemeinsam fuer Toggle und PTT)."""
+        if self.recorder.is_recording:
+            return
+        if not self._text_was_edited:
+            self.panel.set_text("")
+        self.recorder.start()
+        self._recording_start = _time.time()
+        self.panel.set_mic_icon(recording=True)
+        self.panel.set_status("Aufnahme laeuft...")
+        self._recording_timer = rumps.Timer(
+            self._update_recording_time, 1)
+        self._recording_timer.start()
+        self._chunk_timer = rumps.Timer(self._transcribe_chunk, 10)
+        self._chunk_timer.start()
+
+    def _stop_recording(self):
+        """Aufnahme stoppen (gemeinsam fuer Toggle und PTT)."""
+        if not self.recorder.is_recording:
+            return
+        if self._chunk_timer:
+            self._chunk_timer.stop()
+            self._chunk_timer = None
+        self._is_transcribing_chunk = False
+        if self._recording_timer:
+            self._recording_timer.stop()
+            self._recording_timer = None
+        self.panel.set_mic_icon(recording=False)
+        audio = self.recorder.stop()
+        log.info("recorder.stop: audio len=%d", len(audio))
+        if len(audio) > 0:
+            self.panel.set_status("Verarbeite...")
+            self._process_final_chunk(audio)
+        elif not self.panel.get_text().strip():
+            self.panel.set_status("Keine Aufnahme erkannt")
+        else:
+            self.panel.set_status("Bereit")
+
+    # --- Aufnahme: Push-to-Talk (F19) ---
+
+    def _start_ptt_recording(self):
+        """F19 gedrueckt — Aufnahme starten."""
+        log.info("PTT start")
+        self._start_recording()
+
+    def _stop_ptt_recording(self):
+        """F19 losgelassen — Aufnahme stoppen + transkribieren."""
+        log.info("PTT stop")
+        self._stop_recording()
+
+    # --- Timer-Callbacks (abgesichert) ---
 
     def _update_recording_time(self, _):
-        if self._recording_start and self.recorder.is_recording:
-            elapsed = _time.time() - self._recording_start
-            mins, secs = divmod(int(elapsed), 60)
-            self.panel.set_status(f"Aufnahme läuft... {mins:02d}:{secs:02d}")
+        try:
+            if self._recording_start and self.recorder.is_recording:
+                elapsed = _time.time() - self._recording_start
+                mins, secs = divmod(int(elapsed), 60)
+                self.panel.set_status(
+                    f"Aufnahme laeuft... {mins:02d}:{secs:02d}")
+        except Exception:
+            pass
 
     def _transcribe_chunk(self, _):
-        """Alle 10 Sekunden den neuen Audio-Abschnitt transkribieren und uebertragen."""
-        if not self.recorder.is_recording or self._is_transcribing_chunk:
-            return
-        audio = self.recorder.take_chunks()
-        if len(audio) < SAMPLE_RATE * 2:
-            return
-        self._is_transcribing_chunk = True
+        """Alle 10 Sek. neuen Audio-Abschnitt transkribieren."""
+        try:
+            if not self.recorder.is_recording:
+                return
+            if self._is_transcribing_chunk:
+                return
+            audio = self.recorder.take_chunks()
+            if len(audio) < SAMPLE_RATE * 2:
+                return
+            self._is_transcribing_chunk = True
 
-        def _run():
-            text, lang = self.transcriber.transcribe(audio)
-            def _update():
-                self._is_transcribing_chunk = False
-                if text and self.recorder.is_recording:
-                    self.panel.append_text(text)
-                    log.info("chunk transkribiert: %r", text[:60] if text else '')
-                    # Sofort in Ziel-App einfuegen
-                    target = self._app_observer.last_external_app()
-                    if target:
-                        activate_app(target)
-                        _time.sleep(0.15)
-                        type_text(text)
-                        log.info("chunk in Ziel-App eingefuegt")
-            _on_main(_update)
+            def _run():
+                try:
+                    text, lang = self.transcriber.transcribe(audio)
 
-        threading.Thread(target=_run, daemon=True).start()
+                    def _update():
+                        self._is_transcribing_chunk = False
+                        if text and self.recorder.is_recording:
+                            self.panel.append_text(text)
+                            log.info("chunk: %r", text[:60])
+                            self._insert_in_target(text)
+
+                    _on_main(_update)
+                except Exception as e:
+                    self._is_transcribing_chunk = False
+                    log.exception("Chunk-Fehler: %s", e)
+
+            threading.Thread(target=_run, daemon=True).start()
+        except Exception as e:
+            log.exception("_transcribe_chunk Fehler: %s", e)
+
+    # --- Modell + Transkription ---
 
     def _on_model_loaded(self):
         log.info("Modell geladen, Button aktiviert")
@@ -600,96 +631,90 @@ class AudioTranskriptApp(rumps.App):
         self.panel.set_status("Bereit")
 
     def _process_final_chunk(self, audio):
-        """Letzten Audio-Rest nach Stopp transkribieren und einfuegen."""
-        log.info("_process_final_chunk: audio len=%d, duration=%.1fs", len(audio), len(audio)/16000)
+        """Letzten Audio-Rest nach Stopp transkribieren."""
+        log.info("_process_final_chunk: %.1fs",
+                 len(audio) / 16000)
+
         def _run():
             try:
-                log.info("transcribe startet...")
                 text, lang = self.transcriber.transcribe(audio)
-                log.info("transcribe fertig: text=%r, lang=%s", text[:60] if text else '', lang)
-                _on_main(lambda: self._on_recording_finished(text, lang))
+                log.info("final: %r", text[:60] if text else '')
+                _on_main(lambda: self._on_recording_finished(
+                    text, lang))
             except Exception as e:
-                log.exception("FEHLER in _process_final_chunk: %s", e)
+                log.exception("Final-Chunk Fehler: %s", e)
 
         threading.Thread(target=_run, daemon=True).start()
 
     def _on_recording_finished(self, text, lang):
-        lang_names = {"de": "Deutsch", "en": "Englisch", "fr": "Franzoesisch",
-                      "es": "Spanisch", "it": "Italienisch", "nl": "Niederlaendisch"}
+        lang_names = {
+            "de": "Deutsch", "en": "Englisch",
+            "fr": "Franzoesisch", "es": "Spanisch",
+            "it": "Italienisch", "nl": "Niederlaendisch",
+        }
         lang_label = lang_names.get(lang, lang)
-        log.info("_on_recording_finished: text=%r, lang=%s", text[:80] if text else '', lang)
         if text:
             self.panel.append_text(text)
-            # Nur den letzten Rest in die Ziel-App einfuegen
-            # (fruehere Chunks wurden bereits waehrend der Aufnahme uebertragen)
-            target = self._app_observer.last_external_app()
-            log.info("target app=%s", target.localizedName() if target else 'None')
-            if target:
-                activate_app(target)
-                _time.sleep(0.15)
-                type_text(text)
-                log.info("letzter chunk eingefuegt")
+            self._insert_in_target(text)
         self._text_was_edited = False
         self.panel.set_status(f"Bereit ({lang_label})")
 
+    # --- Screenshot-OCR ---
+
     def _do_screenshot_ocr(self):
-        """Screenshot aufnehmen und OCR durchführen."""
+        """Screenshot aufnehmen und OCR durchfuehren."""
         was_visible = self.panel.is_visible()
         if was_visible:
             self.panel.hide()
 
         def _run():
-            _time.sleep(0.3)
-            image = capture_screenshot()
+            try:
+                _time.sleep(0.3)
+                image = capture_screenshot()
 
-            if was_visible:
-                _on_main(lambda: self.panel.show())
+                if was_visible:
+                    _on_main(lambda: self.panel.show())
 
-            if image is None:
-                _on_main(lambda: self.panel.set_status("Screenshot abgebrochen"))
-                return
+                if image is None:
+                    _on_main(lambda: self.panel.set_status(
+                        "Screenshot abgebrochen"))
+                    return
 
-            _on_main(lambda: self.panel.set_status("OCR läuft..."))
-            text = ocr_image(image)
-            _on_main(lambda: self._on_ocr_done(text))
+                _on_main(lambda: self.panel.set_status("OCR laeuft..."))
+                text = ocr_image(image)
+                _on_main(lambda: self._on_ocr_done(text))
+            except Exception as e:
+                log.exception("Screenshot-OCR Fehler: %s", e)
 
         threading.Thread(target=_run, daemon=True).start()
 
     def _on_ocr_done(self, text):
         if text:
-            target = self._app_observer.last_external_app()
-            if target:
-                self.panel.set_text(text)
-                self._text_was_edited = False
-                self.panel.set_status("Text eingefügt")
-                activate_app(target)
-                _time.sleep(0.15)
-                type_text(text)
-            else:
-                self.panel.append_text(text)
-                self._text_was_edited = False
-                self.panel.set_status("Text im Panel angehängt")
+            self.panel.set_text(text)
+            self._text_was_edited = False
+            self.panel.set_status("Text erkannt")
+            self._insert_in_target(text)
         else:
             self.panel.set_status("Kein Text erkannt")
 
 
 def _check_accessibility():
-    """Prüft Accessibility-Berechtigung und zeigt Hinweis."""
+    """Prueft Accessibility-Berechtigung und zeigt Hinweis."""
     from ApplicationServices import AXIsProcessTrustedWithOptions
     from CoreFoundation import kCFBooleanTrue
 
-    options = {
-        "AXTrustedCheckOptionPrompt": kCFBooleanTrue
-    }
+    options = {"AXTrustedCheckOptionPrompt": kCFBooleanTrue}
     trusted = AXIsProcessTrustedWithOptions(options)
     if not trusted:
         rumps.alert(
             title="Berechtigung erforderlich",
             message=(
-                "Audio Transkript benötigt Zugriff auf Bedienungshilfen "
-                "(Accessibility) für Hotkeys und Text-Einfügung.\n\n"
+                "Audio Transkript benoetigt Zugriff auf "
+                "Bedienungshilfen (Accessibility) fuer Hotkeys "
+                "und Text-Einfuegung.\n\n"
                 "Bitte erteile die Berechtigung unter:\n"
-                "Systemeinstellungen → Datenschutz & Sicherheit → Bedienungshilfen"
+                "Systemeinstellungen → Datenschutz & Sicherheit "
+                "→ Bedienungshilfen"
             ),
         )
     return trusted
