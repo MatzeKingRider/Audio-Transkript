@@ -264,7 +264,10 @@ class TranscriptPanel(NSObject):
         self.text_view.setSelectable_(True)
         self.text_view.setRichText_(False)
         self.text_view.setFont_(NSFont.systemFontOfSize_(14))
+        # Word-Wrap: Text bricht am Fensterrand um
+        self.text_view.setHorizontallyResizable_(False)
         self.text_view.textContainer().setWidthTracksTextView_(True)
+        self.text_view.textContainer().setLineFragmentPadding_(4)
         self.text_view.setDelegate_(self)
         self.scroll_view.setDocumentView_(self.text_view)
         content.addSubview_(self.scroll_view)
@@ -439,7 +442,11 @@ class AudioTranskriptApp(rumps.App):
         self.menu = [
             rumps.MenuItem("Oeffnen/Schliessen",
                            callback=self._toggle_panel),
+            rumps.MenuItem("Im Hintergrund",
+                           callback=self._go_background),
             None,
+            rumps.MenuItem("Neustart",
+                           callback=self._restart),
             rumps.MenuItem("Beenden", callback=self._quit),
         ]
 
@@ -465,6 +472,23 @@ class AudioTranskriptApp(rumps.App):
 
     def _toggle_panel(self, _):
         self.panel.toggle()
+
+    def _go_background(self, _):
+        """Panel schliessen, App laeuft im Hintergrund weiter."""
+        self.panel.hide()
+        self.panel.set_status("Im Hintergrund (F18/F19 aktiv)")
+        log.info("Hintergrund-Modus aktiviert")
+
+    def _restart(self, _):
+        """App komplett neu starten."""
+        log.info("Neustart angefordert")
+        self.hotkeys.stop()
+        if self.recorder.is_recording:
+            self.recorder.stop()
+        import subprocess, sys
+        app_path = "/Applications/Audio Transkript.app"
+        subprocess.Popen(["open", app_path])
+        rumps.quit_application()
 
     def _quit(self, _):
         self.hotkeys.stop()

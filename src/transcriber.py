@@ -153,8 +153,12 @@ class Transcriber:
     @staticmethod
     def _fix_spacing(text):
         """Nachbearbeitung: Leerzeichen nach Satzzeichen, Wort-Korrekturen."""
-        # Leerzeichen nach Satzzeichen
+        # Leerzeichen nach Satzzeichen wenn Buchstabe folgt
         text = re.sub(r'([.!?;:,])([A-Za-zÄÖÜäöüß])', r'\1 \2', text)
+        # Leerzeichen nach letztem Satzzeichen anfuegen
+        # (damit nachfolgende Aufnahmen nicht am Satzzeichen kleben)
+        if text and text[-1] in '.!?;:,':
+            text += ' '
         # Wort-Korrekturen (case-insensitive ersetzen)
         for wrong, right in WORD_CORRECTIONS.items():
             text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
