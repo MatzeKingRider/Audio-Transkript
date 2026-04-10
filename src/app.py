@@ -485,9 +485,12 @@ class AudioTranskriptApp(rumps.App):
         self.hotkeys.stop()
         if self.recorder.is_recording:
             self.recorder.stop()
-        import subprocess, sys
-        app_path = "/Applications/Audio Transkript.app"
-        subprocess.Popen(["open", app_path])
+        import subprocess
+        # Shell-Befehl: 1 Sek. warten, dann App oeffnen
+        # Laeuft unabhaengig vom aktuellen Prozess weiter
+        subprocess.Popen(
+            'sleep 1 && open "/Applications/Audio Transkript.app"',
+            shell=True)
         rumps.quit_application()
 
     def _quit(self, _):
