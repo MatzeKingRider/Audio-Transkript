@@ -510,6 +510,14 @@ class AudioTranskriptApp(rumps.App):
         """Text in Ziel-App einfuegen — im Hintergrund-Thread."""
         target = self._app_observer.last_external_app()
         if not target:
+            # Fallback: aktuell aktive App (falls Observer noch nichts hat)
+            from AppKit import NSWorkspace
+            front = NSWorkspace.sharedWorkspace().frontmostApplication()
+            bid = front.bundleIdentifier() if front else None
+            if bid and bid != "com.matze.audio-transkript":
+                target = front
+        if not target:
+            log.warning("Kein Ziel-App gefunden")
             return
 
         def _run():
