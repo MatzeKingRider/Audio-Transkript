@@ -72,6 +72,41 @@ HALLUCINATION_SUFFIXES = [
 ]
 
 
+def dedupe_overlap(prev_text: str, new_text: str, max_tokens: int = 8) -> str:
+    """Entfernt ueberlappende Start-Tokens aus new_text, die bereits am Ende
+    von prev_text stehen. Nuetzlich fuer Audio-Chunks mit Overlap.
+
+    Vergleicht die letzten max_tokens Worte von prev_text mit den ersten
+    max_tokens Worten von new_text (case-insensitive, Satzzeichen ignoriert).
+    Findet den laengsten Praefix von new_text, der als Suffix in prev_text
+    vorkommt, und schneidet ihn weg.
+    """
+    if not prev_text or not new_text:
+        return new_text
+
+    def _norm(tok: str) -> str:
+        return tok.strip(" .,;:!?\"'-").lower()
+
+    prev_tokens = prev_text.split()
+    new_tokens = new_text.split()
+    if not prev_tokens or not new_tokens:
+        return new_text
+
+    prev_tail = [_norm(t) for t in prev_tokens[-max_tokens:]]
+    new_head = [_norm(t) for t in new_tokens[:max_tokens]]
+
+    # Laengsten Overlap finden: new_head[:k] == prev_tail[-k:]
+    best = 0
+    max_k = min(len(prev_tail), len(new_head))
+    for k in range(max_k, 0, -1):
+        if new_head[:k] and new_head[:k] == prev_tail[-k:]:
+            best = k
+            break
+    if best == 0:
+        return new_text
+    return " ".join(new_tokens[best:])
+
+
 class Transcriber:
     """Laedt das Whisper-Modell und transkribiert Audio."""
 
@@ -187,7 +222,7 @@ class Transcriber:
         return text.strip()
 
     @staticmethod
-    def _trim_silence(audio, threshold=0.01):
+    def _trim_silence(audio, threshold=0.008):
         """Stille am Ende des Audio-Arrays entfernen.
 
         Whisper halluziniert wenn am Ende Stille ist.

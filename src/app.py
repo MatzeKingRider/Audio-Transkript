@@ -35,6 +35,7 @@ from AppKit import (
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskResizable,
     NSWindowStyleMaskUtilityWindow,
+    NSWindowStyleMaskFullSizeContentView,
     NSBackingStoreBuffered,
     NSBezelStyleRounded,
     NSColor,
@@ -47,9 +48,10 @@ from PyObjCTools import AppHelper
 from src.config import (
     APP_NAME, ICON_PATH, PANEL_WIDTH, PANEL_HEIGHT, PANEL_TITLE,
     HOTKEY_MIC_TOGGLE, HOTKEY_OCR, SAMPLE_RATE,
+    UI_CORNER_RADIUS, UI_TEXT_INSET, UI_LINE_HEIGHT, UI_FONT_SIZE,
 )
 from src.recorder import Recorder
-from src.transcriber import Transcriber
+from src.transcriber import Transcriber, dedupe_overlap
 from src.ocr import capture_screenshot, ocr_image
 from src.text_input import type_text, activate_app
 from src.hotkeys import HotkeyManager
@@ -63,13 +65,32 @@ def _on_main(fn):
 # --- Icon-Zeichnung ---
 
 def _make_circle_icon(size, bg_color, draw_fn):
-    """Erzeugt ein rundes NSImage mit farbigem Hintergrund und Symbol."""
+    """Rundes Icon im Glaslook: halbtransparent, Highlight-Schimmer oben."""
     img = NSImage.alloc().initWithSize_(NSMakeSize(size, size))
     img.lockFocus()
-    bg_color.setFill()
-    circle = NSBezierPath.bezierPathWithOvalInRect_(
-        NSMakeRect(0, 0, size, size))
+    # Katalogfarbe in RGB-Farbraum konvertieren, dann 60% Opacity
+    try:
+        rgb = bg_color.colorUsingColorSpaceName_("NSCalibratedRGBColorSpace")
+        if rgb is None:
+            rgb = bg_color.colorUsingColorSpaceName_("NSDeviceRGBColorSpace")
+        r, g, b = rgb.redComponent(), rgb.greenComponent(), rgb.blueComponent()
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 0.62).setFill()
+    except Exception:
+        NSColor.colorWithWhite_alpha_(0.4, 0.62).setFill()
+    circle = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(0, 0, size, size))
     circle.fill()
+    # Heller Highlight-Schimmer (obere Hälfte, weiß halbtransparent)
+    NSColor.colorWithWhite_alpha_(1.0, 0.28).setFill()
+    highlight = NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(size * 0.12, size * 0.50, size * 0.76, size * 0.42))
+    highlight.fill()
+    # Feiner weißer Rand
+    NSColor.colorWithWhite_alpha_(1.0, 0.40).setStroke()
+    border = NSBezierPath.bezierPathWithOvalInRect_(
+        NSMakeRect(1, 1, size - 2, size - 2))
+    border.setLineWidth_(1.0)
+    border.stroke()
+    # Symbol
     NSColor.whiteColor().setFill()
     NSColor.whiteColor().setStroke()
     draw_fn(size)
@@ -78,27 +99,36 @@ def _make_circle_icon(size, bg_color, draw_fn):
 
 
 def _draw_mic(size):
-    """Mikrofon-Symbol."""
+    """Klassisches Mikrofon: Kapsel oben, U-Bogen darunter, Stiel, Fuss."""
     cx = size / 2
-    kw, kh = size * 0.22, size * 0.32
+    lw = size * 0.05
+    # Kapsel (Mikrofon-Körper)
+    cap_w = size * 0.20
+    cap_h = size * 0.28
+    cap_y = size * 0.54
     kapsel = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-        NSMakeRect(cx - kw / 2, size * 0.42, kw, kh), kw / 2, kw / 2)
+        NSMakeRect(cx - cap_w / 2, cap_y, cap_w, cap_h), cap_w / 2, cap_w / 2)
     kapsel.fill()
+    # U-Bogen um die Kapsel (öffnet nach oben)
+    arm_r = size * 0.19
+    arm_cy = cap_y + size * 0.04
     bogen = NSBezierPath.bezierPath()
-    bogen.setLineWidth_(size * 0.045)
-    bw = size * 0.34
+    bogen.setLineWidth_(lw)
     bogen.appendBezierPathWithArcWithCenter_radius_startAngle_endAngle_clockwise_(
-        (cx, size * 0.46), bw / 2, 210, 330, True)
+        (cx, arm_cy), arm_r, 180, 0, False)
     bogen.stroke()
+    # Stiel
     stiel = NSBezierPath.bezierPath()
-    stiel.setLineWidth_(size * 0.045)
-    stiel.moveToPoint_((cx, size * 0.30))
-    stiel.lineToPoint_((cx, size * 0.20))
+    stiel.setLineWidth_(lw)
+    stiel.moveToPoint_((cx, arm_cy - arm_r))
+    stiel.lineToPoint_((cx, size * 0.18))
     stiel.stroke()
+    # Fuss (breiter als Stiel)
+    fuss_w = size * 0.30
     fuss = NSBezierPath.bezierPath()
-    fuss.setLineWidth_(size * 0.045)
-    fuss.moveToPoint_((cx - size * 0.10, size * 0.20))
-    fuss.lineToPoint_((cx + size * 0.10, size * 0.20))
+    fuss.setLineWidth_(lw)
+    fuss.moveToPoint_((cx - fuss_w / 2, size * 0.18))
+    fuss.lineToPoint_((cx + fuss_w / 2, size * 0.18))
     fuss.stroke()
 
 
@@ -161,14 +191,55 @@ class TranscriptPanel(NSObject):
             | NSWindowStyleMaskClosable
             | NSWindowStyleMaskResizable
             | NSWindowStyleMaskUtilityWindow
+            | NSWindowStyleMaskFullSizeContentView
         )
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT),
             style, NSBackingStoreBuffered, False)
         self.panel.setTitle_(PANEL_TITLE)
+        self.panel.setTitlebarAppearsTransparent_(True)
+        self.panel.setTitleVisibility_(1)  # NSWindowTitleHidden
         self.panel.setLevel_(NSFloatingWindowLevel)
         self.panel.setHidesOnDeactivate_(False)
         self.panel.setFloatingPanel_(True)
+
+        # Immer Dunkel-Modus, unabhängig von System-Einstellung
+        try:
+            from AppKit import NSAppearance
+            dark = NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua")
+            self.panel.setAppearance_(dark)
+        except Exception as e:
+            log.warning("Dark-Mode konnte nicht gesetzt werden: %s", e)
+
+        # Maximale Transparenz: clearColor + NSVisualEffectView (Blur hinter dem Fenster)
+        try:
+            self.panel.setOpaque_(False)
+            self.panel.setBackgroundColor_(NSColor.clearColor())
+            from AppKit import NSVisualEffectView
+            content_view = self.panel.contentView()
+            bounds = content_view.bounds()
+            effect = NSVisualEffectView.alloc().initWithFrame_(bounds)
+            # Material 3 = NSVisualEffectMaterialTitlebar → dünn, transparent im Darkmode
+            try:
+                effect.setMaterial_(3)
+            except Exception:
+                pass
+            effect.setBlendingMode_(0)   # BehindWindow
+            effect.setState_(1)          # Active
+            effect.setAutoresizingMask_(2 | 16)
+            if content_view.subviews():
+                content_view.addSubview_positioned_relativeTo_(
+                    effect, 0, content_view.subviews()[0])
+            else:
+                content_view.addSubview_(effect)
+            # Abgerundete Ecken
+            content_view.setWantsLayer_(True)
+            layer = content_view.layer()
+            if layer is not None:
+                layer.setCornerRadius_(UI_CORNER_RADIUS)
+                layer.setMasksToBounds_(True)
+        except Exception as e:
+            log.warning("Vibrancy/Appearance Setup fehlgeschlagen: %s", e)
 
         screen = NSScreen.mainScreen().frame()
         x = (screen.size.width - PANEL_WIDTH) / 2
@@ -176,138 +247,195 @@ class TranscriptPanel(NSObject):
         self.panel.setFrameOrigin_((x, y))
 
         content = self.panel.contentView()
-        pad = 20
-        inner_w = PANEL_WIDTH - 2 * pad
 
-        # --- Runde Buttons oben ---
+        # --- Hilfsfunktion: glasiger Aktions-Button ---
+        def _make_sf_button(title, symbol_name):
+            btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 52))
+            btn.setTitle_(title)
+            btn.setBezelStyle_(NSBezelStyleRounded)
+            btn.setWantsLayer_(True)
+            try:
+                btn.layer().setBackgroundColor_(
+                    NSColor.colorWithWhite_alpha_(1.0, 0.12).CGColor())
+                btn.layer().setCornerRadius_(8.0)
+                btn.layer().setBorderWidth_(0.5)
+                btn.layer().setBorderColor_(
+                    NSColor.colorWithWhite_alpha_(1.0, 0.25).CGColor())
+            except Exception:
+                pass
+            try:
+                img = NSImage.imageWithSystemSymbolName_accessibilityDescription_(
+                    symbol_name, None)
+                if img:
+                    btn.setImage_(img)
+                    btn.setImagePosition_(2)  # NSImageAbove
+            except Exception:
+                pass
+            btn.setFont_(NSFont.systemFontOfSize_(11))
+            return btn
+
+        # --- Alle Views erstellen (Frames werden von _relayout gesetzt) ---
+
+        # Runde Hauptbuttons
         btn_size = 60
-        gap = 40
-        total = 2 * btn_size + gap
-        x_mic = (PANEL_WIDTH - total) / 2
-        x_ocr = x_mic + btn_size + gap
-        btn_y = 330
-
-        self.mic_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(x_mic, btn_y, btn_size, btn_size))
+        self.mic_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
         self.mic_btn.setBordered_(False)
         self.mic_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-        self.mic_btn.setImage_(
-            _make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
+        self.mic_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
         self.mic_btn.setTarget_(self)
         self.mic_btn.setAction_("micClicked:")
+        self.mic_btn.setToolTip_("Aufnahme Start/Stopp (F18)")
         content.addSubview_(self.mic_btn)
 
-        mic_label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_mic - 20, btn_y - 20, btn_size + 40, 16))
-        mic_label.setStringValue_("Mikrofon")
-        mic_label.setEditable_(False)
-        mic_label.setBezeled_(False)
-        mic_label.setDrawsBackground_(False)
-        mic_label.setAlignment_(1)
-        mic_label.setFont_(NSFont.systemFontOfSize_(11))
-        mic_label.setTextColor_(NSColor.labelColor())
-        content.addSubview_(mic_label)
+        self.mic_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
+        self.mic_label.setStringValue_("Mikrofon")
+        self.mic_label.setEditable_(False); self.mic_label.setBezeled_(False)
+        self.mic_label.setDrawsBackground_(False); self.mic_label.setAlignment_(1)
+        self.mic_label.setFont_(NSFont.systemFontOfSize_(11))
+        self.mic_label.setTextColor_(NSColor.labelColor())
+        content.addSubview_(self.mic_label)
 
-        mic_hint = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_mic - 20, btn_y - 34, btn_size + 40, 14))
-        mic_hint.setStringValue_("F18 Toggle / F19 Halten")
-        mic_hint.setEditable_(False)
-        mic_hint.setBezeled_(False)
-        mic_hint.setDrawsBackground_(False)
-        mic_hint.setAlignment_(1)
-        mic_hint.setFont_(NSFont.systemFontOfSize_(10))
-        mic_hint.setTextColor_(NSColor.secondaryLabelColor())
-        content.addSubview_(mic_hint)
+        self.mic_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 14))
+        self.mic_hint.setStringValue_("F18 Toggle / F19 Halten")
+        self.mic_hint.setEditable_(False); self.mic_hint.setBezeled_(False)
+        self.mic_hint.setDrawsBackground_(False); self.mic_hint.setAlignment_(1)
+        self.mic_hint.setFont_(NSFont.systemFontOfSize_(10))
+        self.mic_hint.setTextColor_(NSColor.secondaryLabelColor())
+        content.addSubview_(self.mic_hint)
 
-        self.ocr_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(x_ocr, btn_y, btn_size, btn_size))
+        self.ocr_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
         self.ocr_btn.setBordered_(False)
         self.ocr_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-        self.ocr_btn.setImage_(
-            _make_circle_icon(btn_size, NSColor.systemOrangeColor(),
-                              _draw_camera))
+        self.ocr_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemOrangeColor(), _draw_camera))
         self.ocr_btn.setTarget_(self)
         self.ocr_btn.setAction_("ocrClicked:")
+        self.ocr_btn.setToolTip_("Screenshot + OCR (F17)")
         content.addSubview_(self.ocr_btn)
 
-        ocr_label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_ocr - 20, btn_y - 20, btn_size + 40, 16))
-        ocr_label.setStringValue_("Screenshot")
-        ocr_label.setEditable_(False)
-        ocr_label.setBezeled_(False)
-        ocr_label.setDrawsBackground_(False)
-        ocr_label.setAlignment_(1)
-        ocr_label.setFont_(NSFont.systemFontOfSize_(11))
-        ocr_label.setTextColor_(NSColor.labelColor())
-        content.addSubview_(ocr_label)
+        self.ocr_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
+        self.ocr_label.setStringValue_("Screenshot")
+        self.ocr_label.setEditable_(False); self.ocr_label.setBezeled_(False)
+        self.ocr_label.setDrawsBackground_(False); self.ocr_label.setAlignment_(1)
+        self.ocr_label.setFont_(NSFont.systemFontOfSize_(11))
+        self.ocr_label.setTextColor_(NSColor.labelColor())
+        content.addSubview_(self.ocr_label)
 
-        ocr_hint = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(x_ocr - 20, btn_y - 34, btn_size + 40, 14))
-        ocr_hint.setStringValue_("F17")
-        ocr_hint.setEditable_(False)
-        ocr_hint.setBezeled_(False)
-        ocr_hint.setDrawsBackground_(False)
-        ocr_hint.setAlignment_(1)
-        ocr_hint.setFont_(NSFont.systemFontOfSize_(10))
-        ocr_hint.setTextColor_(NSColor.secondaryLabelColor())
-        content.addSubview_(ocr_hint)
+        self.ocr_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 14))
+        self.ocr_hint.setStringValue_("F17")
+        self.ocr_hint.setEditable_(False); self.ocr_hint.setBezeled_(False)
+        self.ocr_hint.setDrawsBackground_(False); self.ocr_hint.setAlignment_(1)
+        self.ocr_hint.setFont_(NSFont.systemFontOfSize_(10))
+        self.ocr_hint.setTextColor_(NSColor.secondaryLabelColor())
+        content.addSubview_(self.ocr_hint)
 
-        # --- Textfeld ---
-        scroll_frame = NSMakeRect(pad, 100, inner_w, 190)
-        self.scroll_view = NSScrollView.alloc().initWithFrame_(scroll_frame)
+        # Textfeld
+        self.scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.scroll_view.setHasVerticalScroller_(True)
+        self.scroll_view.setHasHorizontalScroller_(False)
+        self.scroll_view.setAutohidesScrollers_(False)
         self.scroll_view.setBorderType_(1)
 
-        text_frame = NSMakeRect(0, 0, inner_w - 2, 190)
-        self.text_view = NSTextView.alloc().initWithFrame_(text_frame)
+        self.text_view = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
         self.text_view.setEditable_(True)
         self.text_view.setSelectable_(True)
         self.text_view.setRichText_(False)
-        self.text_view.setFont_(NSFont.systemFontOfSize_(14))
-        # Word-Wrap: Text bricht am Fensterrand um
+        self.text_view.setFont_(NSFont.systemFontOfSize_(UI_FONT_SIZE))
+        self.text_view.setTextColor_(NSColor.labelColor())
+        self.text_view.setAutoresizingMask_(2)  # NSViewWidthSizable
         self.text_view.setHorizontallyResizable_(False)
-        self.text_view.textContainer().setWidthTracksTextView_(True)
-        self.text_view.textContainer().setLineFragmentPadding_(4)
+        self.text_view.setTextContainerInset_(NSMakeSize(6, 6))
+        tc = self.text_view.textContainer()
+        tc.setWidthTracksTextView_(True)
+        tc.setContainerSize_(NSMakeSize(float("inf"), float("inf")))
+        tc.setLineFragmentPadding_(0)
+        from AppKit import NSMutableParagraphStyle
+        ps = NSMutableParagraphStyle.alloc().init()
+        ps.setLineHeightMultiple_(UI_LINE_HEIGHT)
+        self.text_view.setDefaultParagraphStyle_(ps)
+        try:
+            self.text_view.setTypingAttributes_({
+                "NSFont": NSFont.systemFontOfSize_(UI_FONT_SIZE),
+                "NSColor": NSColor.labelColor(),
+                "NSParagraphStyle": ps,
+            })
+        except Exception:
+            pass
         self.text_view.setDelegate_(self)
         self.scroll_view.setDocumentView_(self.text_view)
         content.addSubview_(self.scroll_view)
 
-        # --- Untere Buttons ---
-        btn_w = (inner_w - 20) // 3
-        self.copy_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(pad, 55, btn_w, 32))
-        self.copy_btn.setTitle_("Kopieren")
-        self.copy_btn.setBezelStyle_(NSBezelStyleRounded)
-        self.copy_btn.setTarget_(self)
-        self.copy_btn.setAction_("copyClicked:")
+        # Untere Aktions-Buttons
+        self.copy_btn = _make_sf_button("Kopieren", "doc.on.doc")
+        self.copy_btn.setTarget_(self); self.copy_btn.setAction_("copyClicked:")
         content.addSubview_(self.copy_btn)
 
-        self.insert_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(pad + btn_w + 10, 55, btn_w, 32))
-        self.insert_btn.setTitle_("Einfuegen")
-        self.insert_btn.setBezelStyle_(NSBezelStyleRounded)
-        self.insert_btn.setTarget_(self)
-        self.insert_btn.setAction_("insertClicked:")
+        self.insert_btn = _make_sf_button("Einfügen", "arrow.down.to.line")
+        self.insert_btn.setTarget_(self); self.insert_btn.setAction_("insertClicked:")
         content.addSubview_(self.insert_btn)
 
-        self.clear_btn = NSButton.alloc().initWithFrame_(
-            NSMakeRect(pad + 2 * (btn_w + 10), 55, btn_w, 32))
-        self.clear_btn.setTitle_("Leeren")
-        self.clear_btn.setBezelStyle_(NSBezelStyleRounded)
-        self.clear_btn.setTarget_(self)
-        self.clear_btn.setAction_("clearClicked:")
+        self.clear_btn = _make_sf_button("Leeren", "trash")
+        self.clear_btn.setTarget_(self); self.clear_btn.setAction_("clearClicked:")
         content.addSubview_(self.clear_btn)
 
-        # --- Status-Label ---
-        self.status_label = NSTextField.alloc().initWithFrame_(
-            NSMakeRect(pad, 15, inner_w, 30))
+        # Status-Label
+        self.status_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 30))
         self.status_label.setStringValue_("Bereit")
-        self.status_label.setEditable_(False)
-        self.status_label.setBezeled_(False)
+        self.status_label.setEditable_(False); self.status_label.setBezeled_(False)
         self.status_label.setDrawsBackground_(False)
         self.status_label.setFont_(NSFont.systemFontOfSize_(13))
         self.status_label.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(self.status_label)
+
+        # Delegate für Resize-Events + initiales Layout
+        self.panel.setDelegate_(self)
+        self._relayout()
+
+    @objc.python_method
+    def _relayout(self):
+        """Berechnet alle Frames neu basierend auf der aktuellen Fenstergröße."""
+        w = self.panel.contentView().bounds().size.width
+        h = self.panel.contentView().bounds().size.height
+        pad = 20
+        inner_w = w - 2 * pad
+        btn_size = 60
+        gap = 40
+
+        # Untere Zone: Status + 3 Aktions-Buttons
+        status_h = 28
+        status_y = 10
+        self.status_label.setFrame_(NSMakeRect(pad, status_y, inner_w, status_h))
+
+        btn_h = 52
+        btn_area_y = status_y + status_h + 6
+        btn_w = (inner_w - 20) // 3
+        self.copy_btn.setFrame_(NSMakeRect(pad, btn_area_y, btn_w, btn_h))
+        self.insert_btn.setFrame_(NSMakeRect(pad + btn_w + 10, btn_area_y, btn_w, btn_h))
+        self.clear_btn.setFrame_(NSMakeRect(pad + 2 * (btn_w + 10), btn_area_y, btn_w, btn_h))
+
+        # Obere Zone: Runde Buttons zentriert
+        lbl_h, hint_h = 16, 14
+        top_block_h = btn_size + lbl_h + hint_h + 6
+        top_y = h - top_block_h - 28   # 28px Abstand zum oberen Rand (Traffic-Light-Bereich)
+        total = 2 * btn_size + gap
+        x_mic = (w - total) / 2
+        x_ocr = x_mic + btn_size + gap
+        lbl_w = btn_size + 40
+
+        self.mic_btn.setFrame_(NSMakeRect(x_mic, top_y, btn_size, btn_size))
+        self.mic_label.setFrame_(NSMakeRect(x_mic - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
+        self.mic_hint.setFrame_(NSMakeRect(x_mic - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
+        self.ocr_btn.setFrame_(NSMakeRect(x_ocr, top_y, btn_size, btn_size))
+        self.ocr_label.setFrame_(NSMakeRect(x_ocr - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
+        self.ocr_hint.setFrame_(NSMakeRect(x_ocr - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
+
+        # Mittlere Zone: Scrollview füllt den Rest
+        scroll_top_y = btn_area_y + btn_h + 8
+        round_bottom_y = top_y - lbl_h - hint_h - 8
+        scroll_h = max(60, round_bottom_y - scroll_top_y)
+        self.scroll_view.setFrame_(NSMakeRect(pad, scroll_top_y, inner_w, scroll_h))
+
+    def windowDidResize_(self, notification):
+        self._relayout()
 
     @objc.python_method
     def set_mic_icon(self, recording=False):
@@ -319,8 +447,18 @@ class TranscriptPanel(NSObject):
                 _make_circle_icon(60, NSColor.systemBlueColor(), _draw_mic))
 
     @objc.python_method
-    def set_status(self, text):
+    def set_status(self, text, kind="idle"):
         self.status_label.setStringValue_(text)
+        try:
+            if kind == "recording":
+                self.status_label.setTextColor_(NSColor.systemRedColor())
+            elif kind == "processing":
+                self.status_label.setTextColor_(NSColor.systemOrangeColor())
+            else:
+                self.status_label.setTextColor_(
+                    NSColor.secondaryLabelColor())
+        except Exception:
+            pass
 
     @objc.python_method
     def set_text(self, text):
@@ -439,6 +577,8 @@ class AudioTranskriptApp(rumps.App):
         self._recording_timer = None
         self._chunk_timer = None
         self._is_transcribing_chunk = False
+        self._next_chunk_is_overlap = False
+        self._last_chunk_text = ""
         self.menu = [
             rumps.MenuItem("Oeffnen/Schliessen",
                            callback=self._toggle_panel),
@@ -575,11 +715,14 @@ class AudioTranskriptApp(rumps.App):
         self.recorder.start()
         self._recording_start = _time.time()
         self.panel.set_mic_icon(recording=True)
-        self.panel.set_status("Aufnahme laeuft...")
+        self.panel.set_status("Aufnahme laeuft...", kind="recording")
         self._recording_timer = rumps.Timer(
             self._update_recording_time, 1)
         self._recording_timer.start()
-        self._chunk_timer = rumps.Timer(self._transcribe_chunk, 15)
+        self._next_chunk_is_overlap = False
+        self._last_chunk_text = ""
+        # 1-Sekunden-Tick: entscheidet dynamisch, wann ein Chunk geschnitten wird
+        self._chunk_timer = rumps.Timer(self._transcribe_chunk, 1)
         self._chunk_timer.start()
 
     def _stop_recording(self):
@@ -597,7 +740,7 @@ class AudioTranskriptApp(rumps.App):
         audio = self.recorder.stop()
         log.info("recorder.stop: audio len=%d", len(audio))
         if len(audio) > 0:
-            self.panel.set_status("Verarbeite...")
+            self.panel.set_status("Verarbeite...", kind="processing")
             self._process_final_chunk(audio)
         elif not self.panel.get_text().strip():
             self.panel.set_status("Keine Aufnahme erkannt")
@@ -624,21 +767,51 @@ class AudioTranskriptApp(rumps.App):
                 elapsed = _time.time() - self._recording_start
                 mins, secs = divmod(int(elapsed), 60)
                 self.panel.set_status(
-                    f"Aufnahme laeuft... {mins:02d}:{secs:02d}")
+                    f"Aufnahme laeuft... {mins:02d}:{secs:02d}",
+                    kind="recording")
         except Exception:
             pass
 
     def _transcribe_chunk(self, _):
-        """Alle 10 Sek. neuen Audio-Abschnitt transkribieren."""
+        """1-Sekunden-Tick: smart chunking.
+
+        - Warten bis der Puffer >= 2s ist.
+        - Bei Sprechpause (>=1.5s Stille) sauberen Chunk schneiden.
+        - Bei Puffer >=25s Hard-Cut mit 0.5s Overlap.
+        """
         try:
             if not self.recorder.is_recording:
                 return
             if self._is_transcribing_chunk:
                 return
-            audio = self.recorder.take_chunks()
-            if len(audio) < SAMPLE_RATE * 2:
+
+            snapshot = self.recorder.get_audio_snapshot()
+            buf_len = len(snapshot)
+            min_len = SAMPLE_RATE * 2
+            if buf_len < min_len:
                 return
+
+            is_overlap_chunk = False
+            audio = None
+
+            if self.recorder.has_silence_tail(min_silence_s=1.5,
+                                              rms_threshold=0.008):
+                audio = self.recorder.take_chunks()
+                is_overlap_chunk = self._next_chunk_is_overlap
+                self._next_chunk_is_overlap = False
+            elif buf_len >= SAMPLE_RATE * 25:
+                # Hard-Cut mit Overlap
+                audio = self.recorder.take_chunks_with_overlap(overlap_s=0.5)
+                is_overlap_chunk = self._next_chunk_is_overlap
+                self._next_chunk_is_overlap = True
+            else:
+                return
+
+            if audio is None or len(audio) < min_len:
+                return
+
             self._is_transcribing_chunk = True
+            prev_text = self._last_chunk_text
 
             def _run():
                 try:
@@ -646,10 +819,15 @@ class AudioTranskriptApp(rumps.App):
 
                     def _update():
                         self._is_transcribing_chunk = False
-                        if text and self.recorder.is_recording:
-                            self.panel.append_text(text)
-                            log.info("chunk: %r", text[:60])
-                            self._insert_in_target(text)
+                        final_text = text
+                        if final_text and is_overlap_chunk and prev_text:
+                            final_text = dedupe_overlap(prev_text, final_text)
+                        if final_text and self.recorder.is_recording:
+                            self._last_chunk_text = final_text
+                            self.panel.append_text(final_text)
+                            log.info("chunk: %r (overlap=%s)",
+                                     final_text[:60], is_overlap_chunk)
+                            self._insert_in_target(final_text)
 
                     _on_main(_update)
                 except Exception as e:
@@ -717,7 +895,8 @@ class AudioTranskriptApp(rumps.App):
                         "Screenshot abgebrochen"))
                     return
 
-                _on_main(lambda: self.panel.set_status("OCR laeuft..."))
+                _on_main(lambda: self.panel.set_status(
+                    "OCR laeuft...", kind="processing"))
                 text = ocr_image(image)
                 _on_main(lambda: self._on_ocr_done(text))
             except Exception as e:
