@@ -2,7 +2,7 @@
 name = "audio-transkript"
 version = "0.1.1"
 description = "Lokales macOS Menu-Bar-Tool fuer Sprach-Transkription und Screenshot-OCR"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = [
     "rumps>=0.4.0",
     "pyobjc-framework-Cocoa",

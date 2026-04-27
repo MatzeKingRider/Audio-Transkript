@@ -9,7 +9,7 @@ Lokales macOS Menu-Bar-Tool fuer Sprach-Transkription und Screenshot-OCR. Laeuft
 - **Screenshot-OCR** mit macOS Vision API (Deutsch + Englisch)
 - **Auto-Insert** — transkribierter Text wird direkt ins aktive Eingabefeld eingefuegt
 - **Blockweise Uebertragung** bei langen Aufnahmen (alle 10 Sek.)
-- **Globale Hotkeys** (Cmd+Shift+T = Mikrofon, Cmd+Shift+O = Screenshot)
+- **Globale Hotkeys** (Cmd+Shift+T = Mikrofon, Cmd+Shift+O = Screenshot, Cmd+Shift+M = PTT halten)
 - **Floating Panel** mit Textfeld, Kopieren, Einfuegen, Leeren
 - **Auto-Start** beim Mac-Login
 
@@ -17,7 +17,7 @@ Lokales macOS Menu-Bar-Tool fuer Sprach-Transkription und Screenshot-OCR. Laeuft
 
 - macOS 13+ (Ventura oder neuer)
 - Apple Silicon (M1/M2/M3/M4) **oder** Intel Mac
-- Python 3.10+
+- Python 3.9+ auf Intel, Python 3.10+ empfohlen
 
 | Chip | Whisper-Backend | Modell | RAM-Bedarf |
 |------|----------------|--------|------------|
@@ -82,8 +82,9 @@ tccutil reset ScreenCapture com.matze.audio-transkript
 
 | Aktion | Hotkey | Button |
 |---|---|---|
-| Mikrofon Start/Stop | Cmd+Shift+T | Blauer Mikrofon-Button |
-| Screenshot-OCR | Cmd+Shift+O | Oranger Kamera-Button |
+| Mikrofon Start/Stop | Cmd+Shift+T / F18 | Blauer Mikrofon-Button |
+| PTT halten | Cmd+Shift+M / F19 | PTT-Mikrofon-Button |
+| Screenshot-OCR | Cmd+Shift+O / F17 | Oranger Kamera-Button |
 
 ### Ablauf Sprach-Transkription
 1. Klick ins Ziel-Eingabefeld (z.B. Notizen, Browser, Texteditor)

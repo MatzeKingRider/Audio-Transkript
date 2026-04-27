@@ -152,10 +152,13 @@ class Transcriber:
 
     def _load_faster(self, on_progress=None):
         from faster_whisper import WhisperModel
+        import os
         if on_progress:
             on_progress(f"Lade Whisper-Modell ({WHISPER_MODEL})...")
+        cpu_threads = min(8, os.cpu_count() or 4)
         self._model = WhisperModel(
-            WHISPER_MODEL, device="cpu", compute_type="int8"
+            WHISPER_MODEL, device="cpu", compute_type="int8",
+            cpu_threads=cpu_threads, num_workers=1,
         )
 
     def transcribe(self, audio):
@@ -263,6 +266,8 @@ class Transcriber:
             no_speech_threshold=0.4,
             compression_ratio_threshold=2.0,
             beam_size=5,
+            vad_filter=True,
+            vad_parameters={"min_silence_duration_ms": 300},
         )
         return " ".join(seg.text.strip() for seg in segments).strip()
 

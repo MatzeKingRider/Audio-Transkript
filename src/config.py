@@ -20,8 +20,8 @@ if IS_APPLE_SILICON:
     WHISPER_MODEL = "mlx-community/whisper-large-v3-mlx"
 else:
     WHISPER_BACKEND = "faster"
-    # Auf Intel-CPU ist "medium" ein guter Kompromiss (Geschwindigkeit vs. Qualitaet)
-    WHISPER_MODEL = "medium"
+    # large-v2 mit int8: deutlich bessere Qualitaet als medium, besonders fuer Deutsch
+    WHISPER_MODEL = "large-v2"
 
 WHISPER_LANGUAGE = "de"
 
@@ -29,9 +29,13 @@ WHISPER_LANGUAGE = "de"
 SAMPLE_RATE = 16000
 CHANNELS = 1
 
-# Hotkeys — F-Tasten (F17-F19)
+# Hotkeys — F-Tasten (F17-F19) + MacBook-freundliche Shortcuts
 HOTKEY_MIC_TOGGLE = "<f18>"   # Toggle: Start/Stop (einmal druecken)
 HOTKEY_OCR = "<f17>"          # Screenshot-OCR
+HOTKEY_PTT = "<f19>"          # Push-to-Talk (halten = Aufnahme, loslassen = Stopp)
+HOTKEY_MIC_TOGGLE_ALT = "cmd+shift+t"  # MacBook-freundlicher Shortcut
+HOTKEY_OCR_ALT = "cmd+shift+o"
+HOTKEY_PTT_ALT = "cmd+shift+m"
 # F19 = Push-to-Talk (halten = Aufnahme, loslassen = Stopp) — in hotkeys.py
 
 # Whisper Initial Prompt — steuert Schreibweisen.

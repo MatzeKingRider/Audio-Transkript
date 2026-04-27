@@ -24,6 +24,15 @@ echo "Erstelle Virtual Environment..."
 $PYTHON -m venv .venv
 source .venv/bin/activate
 
+# Venv pip / setuptools / wheel auf den neuesten Stand bringen
+echo "Stelle venv-Tools bereit..."
+python3 -m ensurepip --upgrade 2>&1 | tail -3
+if [ "$ARCH" = "x86_64" ]; then
+    python3 -m pip install --upgrade pip wheel "setuptools==65.7.0" 2>&1 | tail -3
+else
+    python3 -m pip install --upgrade pip setuptools wheel 2>&1 | tail -3
+fi
+
 # Basis-Dependencies installieren
 echo "Installiere Dependencies..."
 pip install -e . 2>&1 | tail -3
@@ -38,7 +47,12 @@ else
 fi
 
 # py2app installieren
-pip install py2app 2>&1 | tail -1
+if [ "$ARCH" = "x86_64" ]; then
+    echo "Intel erkannt — installiere py2app 0.27 für Python 3.9..."
+    pip install "py2app==0.27" 2>&1 | tail -1
+else
+    pip install py2app 2>&1 | tail -1
+fi
 
 # App-Icon erstellen (falls noch nicht vorhanden)
 if [ ! -f assets/AppIcon.icns ]; then

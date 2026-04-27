@@ -43,6 +43,13 @@ from AppKit import (
     NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification,
     NSImageScaleProportionallyUpOrDown,
+    NSTouchBar,
+    NSCustomTouchBarItem,
+    NSSegmentedControl,
+    NSSegmentSwitchTrackingMomentary,
+    NSImageNameTouchBarAudioInputTemplate,
+    NSImageNameTouchBarRecordStartTemplate,
+    NSImageNameTouchBarRecordStopTemplate,
 )
 from PyObjCTools import AppHelper
 from src.config import (
@@ -169,12 +176,34 @@ def _draw_stop(size):
     stop_rect.fill()
 
 
+class PTTButton(NSButton):
+    def mouseDown_(self, event):
+        try:
+            target = self.target()
+            if target and hasattr(target, "pttButtonDown_"):
+                target.pttButtonDown_(self)
+        except Exception:
+            pass
+        super(PTTButton, self).mouseDown_(event)
+
+    def mouseUp_(self, event):
+        try:
+            target = self.target()
+            if target and hasattr(target, "pttButtonUp_"):
+                target.pttButtonUp_(self)
+        except Exception:
+            pass
+        super(PTTButton, self).mouseUp_(event)
+
+
 class TranscriptPanel(NSObject):
     """Floating NSPanel mit Buttons, Textfeld und Status-Anzeige."""
 
     @objc.python_method
     def setup(self):
         self.on_mic_click = None
+        self.on_mic_ptt_down = None
+        self.on_mic_ptt_up = None
         self.on_ocr_click = None
         self.on_copy_click = None
         self.on_insert_click = None
@@ -284,7 +313,7 @@ class TranscriptPanel(NSObject):
         self.mic_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
         self.mic_btn.setTarget_(self)
         self.mic_btn.setAction_("micClicked:")
-        self.mic_btn.setToolTip_("Aufnahme Start/Stopp (F18)")
+        self.mic_btn.setToolTip_("Aufnahme Start/Stopp (F18 / Cmd+Shift+T)")
         content.addSubview_(self.mic_btn)
 
         self.mic_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
@@ -295,13 +324,37 @@ class TranscriptPanel(NSObject):
         self.mic_label.setTextColor_(NSColor.labelColor())
         content.addSubview_(self.mic_label)
 
-        self.mic_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 14))
-        self.mic_hint.setStringValue_("F18 Toggle / F19 Halten")
+        self.mic_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 14))
+        self.mic_hint.setStringValue_("F18 / Cmd+Shift+T")
         self.mic_hint.setEditable_(False); self.mic_hint.setBezeled_(False)
         self.mic_hint.setDrawsBackground_(False); self.mic_hint.setAlignment_(1)
         self.mic_hint.setFont_(NSFont.systemFontOfSize_(10))
         self.mic_hint.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(self.mic_hint)
+
+        self.ptt_btn = PTTButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
+        self.ptt_btn.setBordered_(False)
+        self.ptt_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
+        self.ptt_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
+        self.ptt_btn.setTarget_(self)
+        self.ptt_btn.setToolTip_("Push-to-Talk halten (F19 / Cmd+Shift+M)")
+        content.addSubview_(self.ptt_btn)
+
+        self.ptt_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
+        self.ptt_label.setStringValue_("PTT")
+        self.ptt_label.setEditable_(False); self.ptt_label.setBezeled_(False)
+        self.ptt_label.setDrawsBackground_(False); self.ptt_label.setAlignment_(1)
+        self.ptt_label.setFont_(NSFont.systemFontOfSize_(11))
+        self.ptt_label.setTextColor_(NSColor.labelColor())
+        content.addSubview_(self.ptt_label)
+
+        self.ptt_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 14))
+        self.ptt_hint.setStringValue_("F19 / Cmd+Shift+M halten")
+        self.ptt_hint.setEditable_(False); self.ptt_hint.setBezeled_(False)
+        self.ptt_hint.setDrawsBackground_(False); self.ptt_hint.setAlignment_(1)
+        self.ptt_hint.setFont_(NSFont.systemFontOfSize_(10))
+        self.ptt_hint.setTextColor_(NSColor.secondaryLabelColor())
+        content.addSubview_(self.ptt_hint)
 
         self.ocr_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
         self.ocr_btn.setBordered_(False)
@@ -309,7 +362,7 @@ class TranscriptPanel(NSObject):
         self.ocr_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemOrangeColor(), _draw_camera))
         self.ocr_btn.setTarget_(self)
         self.ocr_btn.setAction_("ocrClicked:")
-        self.ocr_btn.setToolTip_("Screenshot + OCR (F17)")
+        self.ocr_btn.setToolTip_("Screenshot + OCR (F17 / Cmd+Shift+O)")
         content.addSubview_(self.ocr_btn)
 
         self.ocr_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
@@ -321,7 +374,7 @@ class TranscriptPanel(NSObject):
         content.addSubview_(self.ocr_label)
 
         self.ocr_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 14))
-        self.ocr_hint.setStringValue_("F17")
+        self.ocr_hint.setStringValue_("F17 / Cmd+Shift+O")
         self.ocr_hint.setEditable_(False); self.ocr_hint.setBezeled_(False)
         self.ocr_hint.setDrawsBackground_(False); self.ocr_hint.setAlignment_(1)
         self.ocr_hint.setFont_(NSFont.systemFontOfSize_(10))
@@ -416,14 +469,20 @@ class TranscriptPanel(NSObject):
         lbl_h, hint_h = 16, 14
         top_block_h = btn_size + lbl_h + hint_h + 6
         top_y = h - top_block_h - 28   # 28px Abstand zum oberen Rand (Traffic-Light-Bereich)
-        total = 2 * btn_size + gap
+        total = 3 * btn_size + 2 * gap
         x_mic = (w - total) / 2
-        x_ocr = x_mic + btn_size + gap
+        x_ptt = x_mic + btn_size + gap
+        x_ocr = x_ptt + btn_size + gap
         lbl_w = btn_size + 40
 
         self.mic_btn.setFrame_(NSMakeRect(x_mic, top_y, btn_size, btn_size))
         self.mic_label.setFrame_(NSMakeRect(x_mic - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
         self.mic_hint.setFrame_(NSMakeRect(x_mic - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
+
+        self.ptt_btn.setFrame_(NSMakeRect(x_ptt, top_y, btn_size, btn_size))
+        self.ptt_label.setFrame_(NSMakeRect(x_ptt - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
+        self.ptt_hint.setFrame_(NSMakeRect(x_ptt - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
+
         self.ocr_btn.setFrame_(NSMakeRect(x_ocr, top_y, btn_size, btn_size))
         self.ocr_label.setFrame_(NSMakeRect(x_ocr - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
         self.ocr_hint.setFrame_(NSMakeRect(x_ocr - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
@@ -510,6 +569,16 @@ class TranscriptPanel(NSObject):
             self.on_mic_click()
 
     @objc.IBAction
+    def pttButtonDown_(self, sender):
+        if self.on_mic_ptt_down:
+            self.on_mic_ptt_down()
+
+    @objc.IBAction
+    def pttButtonUp_(self, sender):
+        if self.on_mic_ptt_up:
+            self.on_mic_ptt_up()
+
+    @objc.IBAction
     def ocrClicked_(self, sender):
         if self.on_ocr_click:
             self.on_ocr_click()
@@ -557,6 +626,70 @@ class AppActivationObserver(NSObject):
         return self._last_external_app
 
 
+class TouchBarController(NSObject):
+    """PTT-Button in der Touch Bar — nur aktiv auf Macs mit Touch Bar."""
+
+    PTT_IDENTIFIER = "com.matze.audiotranskript.ptt"
+
+    @objc.python_method
+    def setup(self, ptt_start_fn, ptt_stop_fn, panel_window=None):
+        self._ptt_start = ptt_start_fn
+        self._ptt_stop = ptt_stop_fn
+        self._touch_bar = None
+        self._ptt_segment = None
+        self._build(panel_window)
+        return self
+
+    @objc.python_method
+    def _build(self, panel_window=None):
+        from AppKit import NSSet
+        item = self._create_item()
+
+        tb = NSTouchBar.alloc().init()
+        tb.setDefaultItemIdentifiers_([self.PTT_IDENTIFIER])
+        tb.setTemplateItems_(NSSet.setWithObject_(item))
+        self._touch_bar = tb
+
+        if panel_window is not None:
+            panel_window.setTouchBar_(tb)
+        NSApplication.sharedApplication().setTouchBar_(tb)
+
+    @objc.python_method
+    def _create_item(self):
+        item = NSCustomTouchBarItem.alloc().initWithIdentifier_(self.PTT_IDENTIFIER)
+        # NSSegmentedControl im Momentary-Modus: Action faeugt bei Druecken UND Loslassen —
+        # isSelectedForSegment_ gibt True beim Druecken, False beim Loslassen.
+        seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
+            ["🎙 PTT"],
+            NSSegmentSwitchTrackingMomentary,
+            self,
+            "pttSegmentAction:",
+        )
+        seg.setWidth_forSegment_(80, 0)
+        self._ptt_segment = seg
+        item.setView_(seg)
+        return item
+
+    @objc.IBAction
+    def pttSegmentAction_(self, sender):
+        if sender.isSelectedForSegment_(0):
+            self._ptt_start()
+        else:
+            self._ptt_stop()
+
+    @objc.python_method
+    def update_recording_state(self, recording: bool):
+        seg = self._ptt_segment
+        if seg is None:
+            return
+        # Im Momentary-Modus kann man kein Label programmatisch aendern
+        # aber wir koennen den Segment-Zustand visuell beeinflussen:
+        if recording:
+            seg.setLabel_forSegment_("⏹ Stopp", 0)
+        else:
+            seg.setLabel_forSegment_("🎙 PTT", 0)
+
+
 class AudioTranskriptApp(rumps.App):
     """Menu-Bar-App mit Floating Panel."""
 
@@ -567,7 +700,10 @@ class AudioTranskriptApp(rumps.App):
         self.recorder = Recorder()
         self.transcriber = Transcriber()
         self._text_was_edited = False
+        self._target_app = None
         self.panel.on_mic_click = self._toggle_recording
+        self.panel.on_mic_ptt_down = self._start_ptt_recording
+        self.panel.on_mic_ptt_up = self._stop_ptt_recording
         self.panel.on_ocr_click = self._do_screenshot_ocr
         self.panel.on_copy_click = self._copy_text
         self.panel.on_insert_click = self._insert_panel_text
@@ -601,6 +737,20 @@ class AudioTranskriptApp(rumps.App):
             on_ocr_trigger=self._do_screenshot_ocr,
         )
         self.hotkeys.start()
+
+        # Touch Bar PTT — graceful, nur auf MacBook Pro mit Touch Bar aktiv
+        self._touch_bar_ctrl = None
+        try:
+            ctrl = TouchBarController.alloc().init().setup(
+                self._start_ptt_recording,
+                self._stop_ptt_recording,
+                panel_window=self.panel.panel,
+            )
+            self._touch_bar_ctrl = ctrl
+            log.info("Touch Bar PTT eingerichtet")
+        except Exception as e:
+            log.info("Touch Bar nicht verfuegbar (erwartet auf Mac Mini): %s", e)
+
         log.info("Hotkeys und Observer eingerichtet")
 
         self.panel.mic_btn.setEnabled_(False)
@@ -644,11 +794,23 @@ class AudioTranskriptApp(rumps.App):
     def _on_text_edited(self):
         self._text_was_edited = True
 
+    def _remember_target_app(self):
+        """Merkt die App, in die wir nachher Text einfügen wollen."""
+        from AppKit import NSWorkspace
+        front = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if not front:
+            return
+        bid = front.bundleIdentifier()
+        if bid and bid != "com.matze.audio-transkript":
+            self._target_app = front
+        elif self._app_observer.last_external_app():
+            self._target_app = self._app_observer.last_external_app()
+
     # --- Hilfsfunktion: Text in Ziel-App einfuegen (nie Main-Thread blockieren) ---
 
     def _insert_in_target(self, text):
         """Text in Ziel-App einfuegen — im Hintergrund-Thread."""
-        target = self._app_observer.last_external_app()
+        target = self._target_app or self._app_observer.last_external_app()
         if not target:
             # Fallback: aktuell aktive App (falls Observer noch nichts hat)
             from AppKit import NSWorkspace
@@ -699,6 +861,7 @@ class AudioTranskriptApp(rumps.App):
     # --- Aufnahme: Toggle-Modus (F18 / Button) ---
 
     def _toggle_recording(self):
+        self._remember_target_app()
         log.info("_toggle_recording: is_recording=%s",
                  self.recorder.is_recording)
         if self.recorder.is_recording:
@@ -715,6 +878,8 @@ class AudioTranskriptApp(rumps.App):
         self.recorder.start()
         self._recording_start = _time.time()
         self.panel.set_mic_icon(recording=True)
+        if self._touch_bar_ctrl:
+            self._touch_bar_ctrl.update_recording_state(True)
         self.panel.set_status("Aufnahme laeuft...", kind="recording")
         self._recording_timer = rumps.Timer(
             self._update_recording_time, 1)
@@ -737,6 +902,8 @@ class AudioTranskriptApp(rumps.App):
             self._recording_timer.stop()
             self._recording_timer = None
         self.panel.set_mic_icon(recording=False)
+        if self._touch_bar_ctrl:
+            self._touch_bar_ctrl.update_recording_state(False)
         audio = self.recorder.stop()
         log.info("recorder.stop: audio len=%d", len(audio))
         if len(audio) > 0:
@@ -751,6 +918,7 @@ class AudioTranskriptApp(rumps.App):
 
     def _start_ptt_recording(self):
         """F19 gedrueckt — Aufnahme starten."""
+        self._remember_target_app()
         log.info("PTT start")
         self._start_recording()
 
@@ -878,6 +1046,7 @@ class AudioTranskriptApp(rumps.App):
 
     def _do_screenshot_ocr(self):
         """Screenshot aufnehmen und OCR durchfuehren."""
+        self._remember_target_app()
         was_visible = self.panel.is_visible()
         if was_visible:
             self.panel.hide()
