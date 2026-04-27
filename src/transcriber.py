@@ -265,7 +265,8 @@ class Transcriber:
             condition_on_previous_text=False,
             no_speech_threshold=0.4,
             compression_ratio_threshold=2.0,
-            beam_size=5,
+            beam_size=1,
+            best_of=1,
             vad_filter=True,
             vad_parameters={"min_silence_duration_ms": 300},
         )
