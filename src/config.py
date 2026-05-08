@@ -8,7 +8,7 @@ ICON_PATH = "assets/iconTemplate.png"
 
 # Panel
 PANEL_WIDTH = 520
-PANEL_HEIGHT = 440
+PANEL_HEIGHT = 490
 PANEL_TITLE = "Audio Transkript"
 
 # Architektur-Erkennung
@@ -21,7 +21,7 @@ if IS_APPLE_SILICON:
 else:
     WHISPER_BACKEND = "faster"
     # large-v2 mit int8: deutlich bessere Qualitaet als medium, besonders fuer Deutsch
-    WHISPER_MODEL = "large-v2"
+    WHISPER_MODEL = "medium"
 
 WHISPER_LANGUAGE = "de"
 
@@ -33,10 +33,12 @@ CHANNELS = 1
 HOTKEY_MIC_TOGGLE = "<f18>"   # Toggle: Start/Stop (einmal druecken)
 HOTKEY_OCR = "<f17>"          # Screenshot-OCR
 HOTKEY_PTT = "<f19>"          # Push-to-Talk (halten = Aufnahme, loslassen = Stopp)
-HOTKEY_MIC_TOGGLE_ALT = "cmd+shift+t"  # MacBook-freundlicher Shortcut
 HOTKEY_OCR_ALT = "cmd+shift+o"
-HOTKEY_PTT_ALT = "cmd+shift+m"
+HOTKEY_PTT_ALT = "cmd+shift+r"   # Cmd+Shift+R halten = PTT
 # F19 = Push-to-Talk (halten = Aufnahme, loslassen = Stopp) — in hotkeys.py
+
+# Claude Code Usage Monitor
+CLAUDE_USAGE_MONITOR_ENABLED = True
 
 # Whisper Initial Prompt — steuert Schreibweisen.
 # ACHTUNG: Whisper halluziniert den Prompt zurueck wenn er zu lang ist.

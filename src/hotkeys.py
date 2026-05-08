@@ -10,6 +10,8 @@ log = logging.getLogger("AT")
 class HotkeyManager:
     """F17 = OCR, F18 = Toggle-Aufnahme, F19 = Push-to-Talk.
 
+    Alternativen: Cmd+Shift+O = OCR, Cmd+Shift+R = PTT.
+
     Nutzt einen einzelnen keyboard.Listener (nicht GlobalHotKeys),
     weil zwei separate pynput-Listener auf macOS/Darwin crashen.
     """
@@ -32,7 +34,7 @@ class HotkeyManager:
         )
         self._listener.daemon = True
         self._listener.start()
-        log.info("Hotkeys: F17=OCR, F18=Toggle, F19=PTT, Cmd+Shift+T/O/M, Ctrl+S=OCR, Ctrl+P=PTT")
+        log.info("Hotkeys: F17=OCR, F18=Toggle, F19=PTT, Cmd+Shift+O=OCR, Cmd+Shift+R=PTT")
 
     def stop(self):
         """Listener stoppen."""
@@ -43,14 +45,14 @@ class HotkeyManager:
     def _on_key_press(self, key):
         try:
             self._pressed_keys.add(key)
-            if key == keyboard.Key.f19 or self._is_ptt_combo(key) or self._is_ctrl_p(key):
+            if key == keyboard.Key.f19 or self._is_ptt_combo(key):
                 if not self._ptt_active and self._on_mic_ptt_start:
                     self._ptt_active = True
                     self._dispatch(self._on_mic_ptt_start)
-            elif key == keyboard.Key.f18 or self._is_toggle_combo(key):
+            elif key == keyboard.Key.f18:
                 if self._on_mic_toggle:
                     self._dispatch(self._on_mic_toggle)
-            elif key == keyboard.Key.f17 or self._is_ocr_combo(key) or self._is_ctrl_s(key):
+            elif key == keyboard.Key.f17 or self._is_ocr_combo(key):
                 if self._on_ocr_trigger:
                     self._dispatch(self._on_ocr_trigger)
         except Exception as e:
@@ -58,7 +60,7 @@ class HotkeyManager:
 
     def _on_key_release(self, key):
         try:
-            if key == keyboard.Key.f19 or self._is_ptt_combo_key(key) or self._is_ctrl_p_release(key):
+            if key == keyboard.Key.f19 or self._is_ptt_release_key(key):
                 if self._ptt_active and self._on_mic_ptt_stop:
                     self._ptt_active = False
                     self._dispatch(self._on_mic_ptt_stop)
@@ -72,37 +74,33 @@ class HotkeyManager:
         return any(k in self._pressed_keys for k in (
             keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r))
 
-    def _is_ctrl_p(self, key):
-        return getattr(key, "char", None) == "p" and self._is_ctrl_pressed()
-
-    def _is_ctrl_s(self, key):
-        return getattr(key, "char", None) == "s" and self._is_ctrl_pressed()
-
-    def _is_ctrl_p_release(self, key):
-        return getattr(key, "char", None) == "p" or key in (
-            keyboard.Key.ctrl, keyboard.Key.ctrl_l, keyboard.Key.ctrl_r)
-
-    def _is_cmd_shift_pressed(self):
-        has_cmd = any(k in self._pressed_keys for k in (
+    def _is_cmd_pressed(self):
+        return any(k in self._pressed_keys for k in (
             keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r))
-        has_shift = any(k in self._pressed_keys for k in (
-            keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r))
-        return has_cmd and has_shift
 
-    def _has_char(self, char):
-        return any(getattr(k, "char", None) == char for k in self._pressed_keys)
+    def _is_alt_pressed(self):
+        return any(k in self._pressed_keys for k in (
+            keyboard.Key.alt, keyboard.Key.alt_l, keyboard.Key.alt_r))
+
+    def _is_shift_pressed(self):
+        return any(k in self._pressed_keys for k in (
+            keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r))
 
     def _is_ptt_combo(self, key):
-        return getattr(key, "char", None) == "m" and self._is_cmd_shift_pressed()
-
-    def _is_toggle_combo(self, key):
-        return getattr(key, "char", None) == "t" and self._is_cmd_shift_pressed()
+        # Cmd+Shift+R halten = PTT (kein Sonderzeichen, frei von VS Code + macOS)
+        c = getattr(key, "char", None)
+        return (c is not None and c.lower() == "r"
+                and self._is_cmd_pressed() and self._is_shift_pressed())
 
     def _is_ocr_combo(self, key):
-        return getattr(key, "char", None) == "o" and self._is_cmd_shift_pressed()
+        # Cmd+Shift+O = OCR
+        return (getattr(key, "char", None) == "o"
+                and self._is_cmd_pressed() and self._is_shift_pressed())
 
-    def _is_ptt_combo_key(self, key):
-        return getattr(key, "char", None) == "m" or key in (
+    def _is_ptt_release_key(self, key):
+        # Beim Loslassen von R, Cmd oder Shift soll PTT stoppen (Cmd+Shift+R)
+        c = getattr(key, "char", None)
+        return (c is not None and c.lower() == "r") or key in (
             keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r,
             keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)
 

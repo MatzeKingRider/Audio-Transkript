@@ -37,26 +37,26 @@ from AppKit import (
     NSWindowStyleMaskUtilityWindow,
     NSWindowStyleMaskFullSizeContentView,
     NSBackingStoreBuffered,
-    NSBezelStyleRounded,
     NSColor,
     NSScreen,
     NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification,
     NSImageScaleProportionallyUpOrDown,
-    NSTouchBar,
-    NSCustomTouchBarItem,
-    NSSegmentedControl,
-    NSSegmentSwitchTrackingMomentary,
-    NSImageNameTouchBarAudioInputTemplate,
-    NSImageNameTouchBarRecordStartTemplate,
-    NSImageNameTouchBarRecordStopTemplate,
+    NSTimer,
+    NSEventTrackingRunLoopMode,
+    NSDefaultRunLoopMode,
+    NSFontAttributeName,
+    NSForegroundColorAttributeName,
 )
 from PyObjCTools import AppHelper
+from Foundation import NSString
 from src.config import (
     APP_NAME, ICON_PATH, PANEL_WIDTH, PANEL_HEIGHT, PANEL_TITLE,
     HOTKEY_MIC_TOGGLE, HOTKEY_OCR, SAMPLE_RATE,
     UI_CORNER_RADIUS, UI_TEXT_INSET, UI_LINE_HEIGHT, UI_FONT_SIZE,
+    CLAUDE_USAGE_MONITOR_ENABLED,
 )
+from src import claude_usage
 from src.recorder import Recorder
 from src.transcriber import Transcriber, dedupe_overlap
 from src.ocr import capture_screenshot, ocr_image
@@ -176,24 +176,164 @@ def _draw_stop(size):
     stop_rect.fill()
 
 
-class PTTButton(NSButton):
+class MicButton(NSButton):
+    """Mic-Button mit Push-and-Hold-Verhalten.
+
+    - Kurzer Klick (<250 ms) -> Toggle (bestehendes Verhalten)
+    - Halten (>=250 ms)      -> Push-and-Hold: start beim Druecken,
+                                stop beim Loslassen
+    """
+    HOLD_THRESHOLD = 0.25  # Sekunden
+
+    def initWithFrame_(self, frame):
+        self = objc.super(MicButton, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._mic_down_at = None
+        self._mic_in_hold = False
+        return self
+
     def mouseDown_(self, event):
-        try:
-            target = self.target()
-            if target and hasattr(target, "pttButtonDown_"):
-                target.pttButtonDown_(self)
-        except Exception:
-            pass
-        super(PTTButton, self).mouseDown_(event)
+        self._mic_down_at = _time.time()
+        self._mic_in_hold = False
+        target = self.target()
+        # Verzoegert pruefen, ob noch gedrueckt -> Hold-Modus aktiv
+        if target and hasattr(target, "micHoldCheck_"):
+            try:
+                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+                    self.HOLD_THRESHOLD, target, "micHoldCheck:", self, False)
+            except Exception:
+                pass
+        objc.super(MicButton, self).mouseDown_(event)
 
     def mouseUp_(self, event):
-        try:
-            target = self.target()
-            if target and hasattr(target, "pttButtonUp_"):
-                target.pttButtonUp_(self)
-        except Exception:
-            pass
-        super(PTTButton, self).mouseUp_(event)
+        target = self.target()
+        held_for = (_time.time() - self._mic_down_at) if self._mic_down_at else 0.0
+        self._mic_down_at = None
+        if self._mic_in_hold:
+            self._mic_in_hold = False
+            if target and hasattr(target, "micHoldEnd_"):
+                try:
+                    target.micHoldEnd_(self)
+                except Exception:
+                    pass
+        else:
+            # Kurzer Klick -> Toggle
+            if held_for < self.HOLD_THRESHOLD and target and hasattr(target, "micClicked_"):
+                try:
+                    target.micClicked_(self)
+                except Exception:
+                    pass
+        objc.super(MicButton, self).mouseUp_(event)
+
+    def is_pressed(self):
+        return self._mic_down_at is not None
+
+    def enter_hold(self):
+        self._mic_in_hold = True
+
+
+class UsagePanelView(NSView):
+    """Zeichnet kompakte Usage-Zeilen mit Fortschrittsbalken.
+
+    Passt sich dynamisch an die Fensterbreite an (drawRect_ nutzt self.bounds()).
+    """
+
+    def initWithFrame_(self, frame):
+        self = objc.super(UsagePanelView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        # Python-only Instanzattribute — kein ObjC-Ivar-Problem
+        self.__dict__["_rows"] = []
+        self.__dict__["_warning_text"] = None
+        return self
+
+    def isFlipped(self):
+        return True  # y-Koordinaten von oben nach unten
+
+    @objc.python_method
+    def update_rows(self, rows, warning_text=None):
+        self.__dict__["_rows"] = list(rows) if rows else []
+        self.__dict__["_warning_text"] = warning_text
+        self.setNeedsDisplay_(True)
+
+    def drawRect_(self, dirty):  # noqa: N802
+        bounds = self.bounds()
+        total_w = bounds.size.width
+
+        ROW_H = 14
+        GAP = 3
+        BAR_H = 6
+        LABEL_W = 108
+        PCT_W = 32
+        RIGHT_MARGIN = 4
+        bar_x = LABEL_W + 4
+        # Balkenbreite dynamisch — passt sich ans Fenster an
+        bar_w = max(20.0, total_w - LABEL_W - 4 - PCT_W - 4 - 155 - RIGHT_MARGIN)
+        pct_x = bar_x + bar_w + 4
+
+        def _attrs(font, color):
+            return {NSFontAttributeName: font,
+                    NSForegroundColorAttributeName: color}
+
+        main_font = NSFont.systemFontOfSize_(11)
+        sec_font = NSFont.systemFontOfSize_(10)
+
+        def _draw(text, rect, font, color):
+            NSString.stringWithString_(text).drawInRect_withAttributes_(
+                rect, _attrs(font, color))
+
+        warning_text = self.__dict__.get("_warning_text")
+        if warning_text:
+            _draw(warning_text, NSMakeRect(0, 2, total_w, ROW_H * 2),
+                  sec_font, NSColor.systemOrangeColor())
+            return
+
+        bar_bg = NSColor.quaternaryLabelColor()
+        bar_fill = NSColor.systemBlueColor()
+
+        for i, row in enumerate(self.__dict__.get("_rows") or []):
+            top_y = i * (ROW_H + GAP)
+            text_y = top_y + 1
+
+            # Label
+            lbl = row.get("label") or ""
+            lbl_color = NSColor.labelColor() if i == 0 else NSColor.secondaryLabelColor()
+            _draw(lbl, NSMakeRect(0, text_y, LABEL_W, ROW_H),
+                  main_font if i == 0 else sec_font, lbl_color)
+
+            # Balken-Hintergrund
+            bar_y = top_y + (ROW_H - BAR_H) / 2
+            r = BAR_H / 2
+            bg_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(bar_x, bar_y, bar_w, BAR_H), r, r)
+            bar_bg.setFill()
+            bg_path.fill()
+
+            # Balken-Füllung
+            pct = row.get("pct")
+            if pct is not None:
+                try:
+                    fw = max(0.0, min(float(bar_w), bar_w * float(pct) / 100.0))
+                    if fw >= 1.0:
+                        fill_path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                            NSMakeRect(bar_x, bar_y, fw, BAR_H), r, r)
+                        bar_fill.setFill()
+                        fill_path.fill()
+                except Exception:
+                    pass
+
+            # Prozent-Wert
+            pct_str = f"{int(round(float(pct)))}%" if pct is not None else "—"
+            _draw(pct_str, NSMakeRect(pct_x, text_y, PCT_W, ROW_H),
+                  sec_font, NSColor.secondaryLabelColor())
+
+            # Rechter Text (Reset-Zeit, Betrag)
+            right = row.get("right") or ""
+            if right:
+                right_x = pct_x + PCT_W + 4
+                _draw(right, NSMakeRect(right_x, text_y, max(0.0, total_w - right_x), ROW_H),
+                      sec_font, NSColor.tertiaryLabelColor())
 
 
 class TranscriptPanel(NSObject):
@@ -202,13 +342,14 @@ class TranscriptPanel(NSObject):
     @objc.python_method
     def setup(self):
         self.on_mic_click = None
-        self.on_mic_ptt_down = None
-        self.on_mic_ptt_up = None
+        self.on_mic_hold_start = None
+        self.on_mic_hold_end = None
         self.on_ocr_click = None
         self.on_copy_click = None
         self.on_insert_click = None
         self.on_clear_click = None
         self.on_text_edited = None
+        self.on_usage_click = None
         self._programmatic_text_change = False
         self._build_panel()
         return self
@@ -281,15 +422,16 @@ class TranscriptPanel(NSObject):
         def _make_sf_button(title, symbol_name):
             btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 52))
             btn.setTitle_(title)
-            btn.setBezelStyle_(NSBezelStyleRounded)
+            btn.setBordered_(False)  # kein System-Bezel = kein doppelter Rahmen
             btn.setWantsLayer_(True)
             try:
-                btn.layer().setBackgroundColor_(
-                    NSColor.colorWithWhite_alpha_(1.0, 0.12).CGColor())
-                btn.layer().setCornerRadius_(8.0)
-                btn.layer().setBorderWidth_(0.5)
-                btn.layer().setBorderColor_(
-                    NSColor.colorWithWhite_alpha_(1.0, 0.25).CGColor())
+                layer = btn.layer()
+                layer.setBackgroundColor_(
+                    NSColor.colorWithWhite_alpha_(1.0, 0.16).CGColor())
+                layer.setCornerRadius_(10.0)
+                layer.setBorderWidth_(0.6)
+                layer.setBorderColor_(
+                    NSColor.colorWithWhite_alpha_(1.0, 0.35).CGColor())
             except Exception:
                 pass
             try:
@@ -297,23 +439,26 @@ class TranscriptPanel(NSObject):
                     symbol_name, None)
                 if img:
                     btn.setImage_(img)
-                    btn.setImagePosition_(2)  # NSImageAbove
+                    btn.setImagePosition_(2)  # NSImageLeft
             except Exception:
                 pass
             btn.setFont_(NSFont.systemFontOfSize_(11))
+            try:
+                btn.setImageHugsTitle_(True)  # Icon bleibt am Label, nicht am Rand
+            except Exception:
+                pass
             return btn
 
         # --- Alle Views erstellen (Frames werden von _relayout gesetzt) ---
 
         # Runde Hauptbuttons
         btn_size = 60
-        self.mic_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
+        self.mic_btn = MicButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
         self.mic_btn.setBordered_(False)
         self.mic_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
         self.mic_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
         self.mic_btn.setTarget_(self)
-        self.mic_btn.setAction_("micClicked:")
-        self.mic_btn.setToolTip_("Aufnahme Start/Stopp (F18 / Cmd+Shift+T)")
+        self.mic_btn.setToolTip_("Klick = Toggle, halten = Push-to-Talk (F19 / Cmd+Shift+R)")
         content.addSubview_(self.mic_btn)
 
         self.mic_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
@@ -324,37 +469,13 @@ class TranscriptPanel(NSObject):
         self.mic_label.setTextColor_(NSColor.labelColor())
         content.addSubview_(self.mic_label)
 
-        self.mic_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 14))
-        self.mic_hint.setStringValue_("F18 / Cmd+Shift+T")
+        self.mic_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 160, 14))
+        self.mic_hint.setStringValue_("F19 / Cmd+Shift+R halten")
         self.mic_hint.setEditable_(False); self.mic_hint.setBezeled_(False)
         self.mic_hint.setDrawsBackground_(False); self.mic_hint.setAlignment_(1)
         self.mic_hint.setFont_(NSFont.systemFontOfSize_(10))
         self.mic_hint.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(self.mic_hint)
-
-        self.ptt_btn = PTTButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
-        self.ptt_btn.setBordered_(False)
-        self.ptt_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
-        self.ptt_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
-        self.ptt_btn.setTarget_(self)
-        self.ptt_btn.setToolTip_("Push-to-Talk halten (F19 / Cmd+Shift+M)")
-        content.addSubview_(self.ptt_btn)
-
-        self.ptt_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
-        self.ptt_label.setStringValue_("PTT")
-        self.ptt_label.setEditable_(False); self.ptt_label.setBezeled_(False)
-        self.ptt_label.setDrawsBackground_(False); self.ptt_label.setAlignment_(1)
-        self.ptt_label.setFont_(NSFont.systemFontOfSize_(11))
-        self.ptt_label.setTextColor_(NSColor.labelColor())
-        content.addSubview_(self.ptt_label)
-
-        self.ptt_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 120, 14))
-        self.ptt_hint.setStringValue_("F19 / Cmd+Shift+M halten")
-        self.ptt_hint.setEditable_(False); self.ptt_hint.setBezeled_(False)
-        self.ptt_hint.setDrawsBackground_(False); self.ptt_hint.setAlignment_(1)
-        self.ptt_hint.setFont_(NSFont.systemFontOfSize_(10))
-        self.ptt_hint.setTextColor_(NSColor.secondaryLabelColor())
-        content.addSubview_(self.ptt_hint)
 
         self.ocr_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, btn_size, btn_size))
         self.ocr_btn.setBordered_(False)
@@ -362,7 +483,7 @@ class TranscriptPanel(NSObject):
         self.ocr_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemOrangeColor(), _draw_camera))
         self.ocr_btn.setTarget_(self)
         self.ocr_btn.setAction_("ocrClicked:")
-        self.ocr_btn.setToolTip_("Screenshot + OCR (F17 / Cmd+Shift+O)")
+        self.ocr_btn.setToolTip_("Screenshot + OCR (F17 / ⌘⇧O)")
         content.addSubview_(self.ocr_btn)
 
         self.ocr_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
@@ -430,6 +551,13 @@ class TranscriptPanel(NSObject):
         self.clear_btn.setTarget_(self); self.clear_btn.setAction_("clearClicked:")
         content.addSubview_(self.clear_btn)
 
+        # Claude-Code-Usage-Panel (Balken-Ansicht, ueber dem Status-Label)
+        self.usage_enabled = bool(CLAUDE_USAGE_MONITOR_ENABLED)
+        self.usage_view = UsagePanelView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 82))
+        content.addSubview_(self.usage_view)
+        if not self.usage_enabled:
+            self.usage_view.setHidden_(True)
+
         # Status-Label
         self.status_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 30))
         self.status_label.setStringValue_("Bereit")
@@ -451,41 +579,45 @@ class TranscriptPanel(NSObject):
         pad = 20
         inner_w = w - 2 * pad
         btn_size = 60
-        gap = 40
+        gap = 60
 
-        # Untere Zone: Status + 3 Aktions-Buttons
+        # Untere Zone: Status + Usage-Panel + 3 Aktions-Buttons
         status_h = 28
         status_y = 10
         self.status_label.setFrame_(NSMakeRect(pad, status_y, inner_w, status_h))
 
+        # Usage-Panel direkt ueber dem Status-Label
+        if self.usage_enabled:
+            usage_h = 82  # 5 Zeilen × (14px + 3px Gap) - letzte Gap
+            usage_y = status_y + status_h + 4
+            self.usage_view.setFrame_(NSMakeRect(pad, usage_y, inner_w, usage_h))
+            usage_top_y = usage_y + usage_h + 6
+        else:
+            usage_top_y = status_y + status_h + 6
+
         btn_h = 52
-        btn_area_y = status_y + status_h + 6
+        btn_area_y = usage_top_y
         btn_w = (inner_w - 20) // 3
         self.copy_btn.setFrame_(NSMakeRect(pad, btn_area_y, btn_w, btn_h))
         self.insert_btn.setFrame_(NSMakeRect(pad + btn_w + 10, btn_area_y, btn_w, btn_h))
         self.clear_btn.setFrame_(NSMakeRect(pad + 2 * (btn_w + 10), btn_area_y, btn_w, btn_h))
 
-        # Obere Zone: Runde Buttons zentriert
+        # Obere Zone: Runde Buttons zentriert (nur Mic + OCR)
         lbl_h, hint_h = 16, 14
         top_block_h = btn_size + lbl_h + hint_h + 6
-        top_y = h - top_block_h - 28   # 28px Abstand zum oberen Rand (Traffic-Light-Bereich)
-        total = 3 * btn_size + 2 * gap
+        top_y = h - top_block_h - 28
+        total = 2 * btn_size + gap
         x_mic = (w - total) / 2
-        x_ptt = x_mic + btn_size + gap
-        x_ocr = x_ptt + btn_size + gap
-        lbl_w = btn_size + 40
+        x_ocr = x_mic + btn_size + gap
+        lbl_w = btn_size + 80
 
         self.mic_btn.setFrame_(NSMakeRect(x_mic, top_y, btn_size, btn_size))
-        self.mic_label.setFrame_(NSMakeRect(x_mic - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
-        self.mic_hint.setFrame_(NSMakeRect(x_mic - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
-
-        self.ptt_btn.setFrame_(NSMakeRect(x_ptt, top_y, btn_size, btn_size))
-        self.ptt_label.setFrame_(NSMakeRect(x_ptt - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
-        self.ptt_hint.setFrame_(NSMakeRect(x_ptt - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
+        self.mic_label.setFrame_(NSMakeRect(x_mic - 40, top_y - lbl_h - 2, lbl_w, lbl_h))
+        self.mic_hint.setFrame_(NSMakeRect(x_mic - 40, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
 
         self.ocr_btn.setFrame_(NSMakeRect(x_ocr, top_y, btn_size, btn_size))
-        self.ocr_label.setFrame_(NSMakeRect(x_ocr - 20, top_y - lbl_h - 2, lbl_w, lbl_h))
-        self.ocr_hint.setFrame_(NSMakeRect(x_ocr - 20, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
+        self.ocr_label.setFrame_(NSMakeRect(x_ocr - 40, top_y - lbl_h - 2, lbl_w, lbl_h))
+        self.ocr_hint.setFrame_(NSMakeRect(x_ocr - 40, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
 
         # Mittlere Zone: Scrollview füllt den Rest
         scroll_top_y = btn_area_y + btn_h + 8
@@ -504,6 +636,16 @@ class TranscriptPanel(NSObject):
         else:
             self.mic_btn.setImage_(
                 _make_circle_icon(60, NSColor.systemBlueColor(), _draw_mic))
+
+    @objc.python_method
+    def update_usage_rows(self, rows, warning_text=None):
+        """Aktualisiert das Usage-Panel mit neuen Zeilen oder Warntext."""
+        if not getattr(self, "usage_enabled", False):
+            return
+        try:
+            self.usage_view.update_rows(rows, warning_text)
+        except Exception:
+            log.exception("update_usage_rows Fehler")
 
     @objc.python_method
     def set_status(self, text, kind="idle"):
@@ -568,15 +710,26 @@ class TranscriptPanel(NSObject):
         if self.on_mic_click:
             self.on_mic_click()
 
-    @objc.IBAction
-    def pttButtonDown_(self, sender):
-        if self.on_mic_ptt_down:
-            self.on_mic_ptt_down()
+    def micHoldCheck_(self, timer):
+        """Wird HOLD_THRESHOLD Sek. nach mouseDown gefeuert.
 
-    @objc.IBAction
-    def pttButtonUp_(self, sender):
-        if self.on_mic_ptt_up:
-            self.on_mic_ptt_up()
+        Wenn der Button noch gedrueckt ist, gilt es als Hold:
+        Aufnahme starten.
+        """
+        try:
+            btn = timer.userInfo() if hasattr(timer, "userInfo") else None
+            if btn is None:
+                btn = self.mic_btn
+            if btn.is_pressed():
+                btn.enter_hold()
+                if self.on_mic_hold_start:
+                    self.on_mic_hold_start()
+        except Exception:
+            log.exception("micHoldCheck_ Fehler")
+
+    def micHoldEnd_(self, sender):
+        if self.on_mic_hold_end:
+            self.on_mic_hold_end()
 
     @objc.IBAction
     def ocrClicked_(self, sender):
@@ -626,70 +779,6 @@ class AppActivationObserver(NSObject):
         return self._last_external_app
 
 
-class TouchBarController(NSObject):
-    """PTT-Button in der Touch Bar — nur aktiv auf Macs mit Touch Bar."""
-
-    PTT_IDENTIFIER = "com.matze.audiotranskript.ptt"
-
-    @objc.python_method
-    def setup(self, ptt_start_fn, ptt_stop_fn, panel_window=None):
-        self._ptt_start = ptt_start_fn
-        self._ptt_stop = ptt_stop_fn
-        self._touch_bar = None
-        self._ptt_segment = None
-        self._build(panel_window)
-        return self
-
-    @objc.python_method
-    def _build(self, panel_window=None):
-        from AppKit import NSSet
-        item = self._create_item()
-
-        tb = NSTouchBar.alloc().init()
-        tb.setDefaultItemIdentifiers_([self.PTT_IDENTIFIER])
-        tb.setTemplateItems_(NSSet.setWithObject_(item))
-        self._touch_bar = tb
-
-        if panel_window is not None:
-            panel_window.setTouchBar_(tb)
-        NSApplication.sharedApplication().setTouchBar_(tb)
-
-    @objc.python_method
-    def _create_item(self):
-        item = NSCustomTouchBarItem.alloc().initWithIdentifier_(self.PTT_IDENTIFIER)
-        # NSSegmentedControl im Momentary-Modus: Action faeugt bei Druecken UND Loslassen —
-        # isSelectedForSegment_ gibt True beim Druecken, False beim Loslassen.
-        seg = NSSegmentedControl.segmentedControlWithLabels_trackingMode_target_action_(
-            ["🎙 PTT"],
-            NSSegmentSwitchTrackingMomentary,
-            self,
-            "pttSegmentAction:",
-        )
-        seg.setWidth_forSegment_(80, 0)
-        self._ptt_segment = seg
-        item.setView_(seg)
-        return item
-
-    @objc.IBAction
-    def pttSegmentAction_(self, sender):
-        if sender.isSelectedForSegment_(0):
-            self._ptt_start()
-        else:
-            self._ptt_stop()
-
-    @objc.python_method
-    def update_recording_state(self, recording: bool):
-        seg = self._ptt_segment
-        if seg is None:
-            return
-        # Im Momentary-Modus kann man kein Label programmatisch aendern
-        # aber wir koennen den Segment-Zustand visuell beeinflussen:
-        if recording:
-            seg.setLabel_forSegment_("⏹ Stopp", 0)
-        else:
-            seg.setLabel_forSegment_("🎙 PTT", 0)
-
-
 class AudioTranskriptApp(rumps.App):
     """Menu-Bar-App mit Floating Panel."""
 
@@ -702,8 +791,8 @@ class AudioTranskriptApp(rumps.App):
         self._text_was_edited = False
         self._target_app = None
         self.panel.on_mic_click = self._toggle_recording
-        self.panel.on_mic_ptt_down = self._start_ptt_recording
-        self.panel.on_mic_ptt_up = self._stop_ptt_recording
+        self.panel.on_mic_hold_start = self._start_ptt_recording
+        self.panel.on_mic_hold_end = self._stop_ptt_recording
         self.panel.on_ocr_click = self._do_screenshot_ocr
         self.panel.on_copy_click = self._copy_text
         self.panel.on_insert_click = self._insert_panel_text
@@ -738,20 +827,17 @@ class AudioTranskriptApp(rumps.App):
         )
         self.hotkeys.start()
 
-        # Touch Bar PTT — graceful, nur auf MacBook Pro mit Touch Bar aktiv
-        self._touch_bar_ctrl = None
-        try:
-            ctrl = TouchBarController.alloc().init().setup(
-                self._start_ptt_recording,
-                self._stop_ptt_recording,
-                panel_window=self.panel.panel,
-            )
-            self._touch_bar_ctrl = ctrl
-            log.info("Touch Bar PTT eingerichtet")
-        except Exception as e:
-            log.info("Touch Bar nicht verfuegbar (erwartet auf Mac Mini): %s", e)
-
         log.info("Hotkeys und Observer eingerichtet")
+
+        # Claude-Code-Usage-Monitor: 60s-Refresh
+        self._usage_timer = None
+        if CLAUDE_USAGE_MONITOR_ENABLED:
+            self._refresh_usage()
+            try:
+                self._usage_timer = rumps.Timer(self._refresh_usage_tick, 60)
+                self._usage_timer.start()
+            except Exception as e:
+                log.warning("Usage-Timer konnte nicht gestartet werden: %s", e)
 
         self.panel.mic_btn.setEnabled_(False)
         self.transcriber.load_model(
@@ -793,6 +879,86 @@ class AudioTranskriptApp(rumps.App):
 
     def _on_text_edited(self):
         self._text_was_edited = True
+
+    # --- Claude-Code-Usage ---
+
+    def _refresh_usage_tick(self, _):
+        self._refresh_usage()
+
+    def _refresh_usage(self):
+        """Holt Usage-Daten im Hintergrund und aktualisiert das Panel."""
+        def _run():
+            try:
+                data = claude_usage.fetch_usage()
+                _on_main(lambda: self._apply_usage(data))
+            except Exception as e:
+                log.exception("Usage-Refresh Fehler: %s", e)
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _apply_usage(self, data):
+        if not data or not data.get("ok"):
+            detail = (data or {}).get("detail", "Nutzungsdaten nicht verfuegbar.")
+            self.panel.update_usage_rows([], f"⚠ {detail}")
+            return
+
+        def safe_pct(block):
+            v = (block or {}).get("pct")
+            try:
+                return float(v) if v is not None else None
+            except Exception:
+                return None
+
+        sess = data.get("session") or {}
+        wk_all = data.get("week_all") or {}
+        wk_son = data.get("week_sonnet") or {}
+        wk_ome = data.get("week_omelette") or {}
+        extra = data.get("extra") or {}
+
+        rows = [
+            {
+                "label": "Aktuelle Sitzung",
+                "pct": safe_pct(sess),
+                "right": f"Reset {claude_usage.format_reset(sess.get('reset'))}",
+            },
+            {
+                "label": "Alle Modelle",
+                "pct": safe_pct(wk_all),
+                "right": f"Reset {claude_usage.format_reset(wk_all.get('reset'))}",
+            },
+            {
+                "label": "Nur Sonnet",
+                "pct": safe_pct(wk_son),
+                "right": "",
+            },
+            {
+                "label": "Claude Code",
+                "pct": safe_pct(wk_ome),
+                "right": "",
+            },
+        ]
+
+        if extra.get("enabled"):
+            used = extra.get("used_credits")
+            limit = extra.get("monthly_limit")
+            cur = extra.get("currency") or ""
+            sym = {"EUR": "€", "USD": "$", "GBP": "£"}.get(cur, cur)
+            right = ""
+            if used is not None and limit is not None:
+                try:
+                    # API liefert Cent-Werte — durch 100 dividieren
+                    used_e = float(used) / 100.0
+                    limit_e = float(limit) / 100.0
+                    right = (f"{used_e:.2f} {sym} / {int(limit_e)} {sym}"
+                             .replace(".", ","))
+                except Exception:
+                    pass
+            rows.append({
+                "label": "Zusatznutzung",
+                "pct": extra.get("pct"),
+                "right": right,
+            })
+
+        self.panel.update_usage_rows(rows, None)
 
     def _remember_target_app(self):
         """Merkt die App, in die wir nachher Text einfügen wollen."""
@@ -878,8 +1044,6 @@ class AudioTranskriptApp(rumps.App):
         self.recorder.start()
         self._recording_start = _time.time()
         self.panel.set_mic_icon(recording=True)
-        if self._touch_bar_ctrl:
-            self._touch_bar_ctrl.update_recording_state(True)
         self.panel.set_status("Aufnahme laeuft...", kind="recording")
         self._recording_timer = rumps.Timer(
             self._update_recording_time, 1)
@@ -902,8 +1066,6 @@ class AudioTranskriptApp(rumps.App):
             self._recording_timer.stop()
             self._recording_timer = None
         self.panel.set_mic_icon(recording=False)
-        if self._touch_bar_ctrl:
-            self._touch_bar_ctrl.update_recording_state(False)
         audio = self.recorder.stop()
         log.info("recorder.stop: audio len=%d", len(audio))
         if len(audio) > 0:
