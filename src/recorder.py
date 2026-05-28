@@ -14,6 +14,8 @@ class Recorder:
         self._lock = threading.Lock()
         self._stream = None
         self.is_recording = False
+        self.gain = 1.0           # Software-Verstaerkung; UI-Slider 0..4
+        self._level = 0.0         # Letzter Peak-Wert (0..1) fuer VU-Meter
 
     def start(self):
         """Aufnahme starten."""
@@ -34,6 +36,7 @@ class Recorder:
             self._stream.close()
             self._stream = None
         self.is_recording = False
+        self._level = 0.0
 
         with self._lock:
             if not self._chunks:
@@ -122,7 +125,15 @@ class Recorder:
                 return False
         return True
 
+    def get_level(self):
+        """Aktueller Peak-Pegel (0..1) fuer VU-Meter-Anzeige."""
+        return self._level
+
     def _callback(self, indata, frames, time, status):
-        """Stream-Callback — Audio-Chunks sammeln."""
+        """Stream-Callback — Gain anwenden, Pegel messen, Audio sammeln."""
+        amplified = indata * self.gain if self.gain != 1.0 else indata
+        # Peak fuer VU-Meter (schnelle Reaktion, kein Smoothing — UI macht das)
+        if amplified.size:
+            self._level = float(np.max(np.abs(amplified)))
         with self._lock:
-            self._chunks.append(indata.copy())
+            self._chunks.append(amplified.copy())

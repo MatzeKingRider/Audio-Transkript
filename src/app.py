@@ -42,6 +42,8 @@ from AppKit import (
     NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification,
     NSImageScaleProportionallyUpOrDown,
+    NSLevelIndicator,
+    NSSlider,
     NSTimer,
     NSEventTrackingRunLoopMode,
     NSDefaultRunLoopMode,
@@ -49,7 +51,7 @@ from AppKit import (
     NSForegroundColorAttributeName,
 )
 from PyObjCTools import AppHelper
-from Foundation import NSString
+from Foundation import NSString, NSUserDefaults
 from src.config import (
     APP_NAME, ICON_PATH, PANEL_WIDTH, PANEL_HEIGHT, PANEL_TITLE,
     HOTKEY_MIC_TOGGLE, HOTKEY_OCR, SAMPLE_RATE,
@@ -177,60 +179,11 @@ def _draw_stop(size):
 
 
 class MicButton(NSButton):
-    """Mic-Button mit Push-and-Hold-Verhalten.
+    """Reiner Toggle-Button: 1x klicken = Start, nochmal = Stopp.
 
-    - Kurzer Klick (<250 ms) -> Toggle (bestehendes Verhalten)
-    - Halten (>=250 ms)      -> Push-and-Hold: start beim Druecken,
-                                stop beim Loslassen
+    Push-to-Talk laeuft ueber den globalen F19-Hotkey, nicht ueber diesen Button —
+    dort gibt es keine Race-Condition mit Click/Hold-Erkennung.
     """
-    HOLD_THRESHOLD = 0.25  # Sekunden
-
-    def initWithFrame_(self, frame):
-        self = objc.super(MicButton, self).initWithFrame_(frame)
-        if self is None:
-            return None
-        self._mic_down_at = None
-        self._mic_in_hold = False
-        return self
-
-    def mouseDown_(self, event):
-        self._mic_down_at = _time.time()
-        self._mic_in_hold = False
-        target = self.target()
-        # Verzoegert pruefen, ob noch gedrueckt -> Hold-Modus aktiv
-        if target and hasattr(target, "micHoldCheck_"):
-            try:
-                NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
-                    self.HOLD_THRESHOLD, target, "micHoldCheck:", self, False)
-            except Exception:
-                pass
-        objc.super(MicButton, self).mouseDown_(event)
-
-    def mouseUp_(self, event):
-        target = self.target()
-        held_for = (_time.time() - self._mic_down_at) if self._mic_down_at else 0.0
-        self._mic_down_at = None
-        if self._mic_in_hold:
-            self._mic_in_hold = False
-            if target and hasattr(target, "micHoldEnd_"):
-                try:
-                    target.micHoldEnd_(self)
-                except Exception:
-                    pass
-        else:
-            # Kurzer Klick -> Toggle
-            if held_for < self.HOLD_THRESHOLD and target and hasattr(target, "micClicked_"):
-                try:
-                    target.micClicked_(self)
-                except Exception:
-                    pass
-        objc.super(MicButton, self).mouseUp_(event)
-
-    def is_pressed(self):
-        return self._mic_down_at is not None
-
-    def enter_hold(self):
-        self._mic_in_hold = True
 
 
 class UsagePanelView(NSView):
@@ -342,8 +295,8 @@ class TranscriptPanel(NSObject):
     @objc.python_method
     def setup(self):
         self.on_mic_click = None
-        self.on_mic_hold_start = None
-        self.on_mic_hold_end = None
+        self.on_lang_toggle = None
+        self.on_gain_change = None  # callback(new_gain: float)
         self.on_ocr_click = None
         self.on_copy_click = None
         self.on_insert_click = None
@@ -458,7 +411,8 @@ class TranscriptPanel(NSObject):
         self.mic_btn.setImageScaling_(NSImageScaleProportionallyUpOrDown)
         self.mic_btn.setImage_(_make_circle_icon(btn_size, NSColor.systemBlueColor(), _draw_mic))
         self.mic_btn.setTarget_(self)
-        self.mic_btn.setToolTip_("Klick = Toggle, halten = Push-to-Talk (F19 / Cmd+Shift+R)")
+        self.mic_btn.setAction_("micClicked:")
+        self.mic_btn.setToolTip_("Klick = Aufnahme starten/stoppen. F19 halten = Push-to-Talk.")
         content.addSubview_(self.mic_btn)
 
         self.mic_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 16))
@@ -470,7 +424,7 @@ class TranscriptPanel(NSObject):
         content.addSubview_(self.mic_label)
 
         self.mic_hint = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 160, 14))
-        self.mic_hint.setStringValue_("F19 / Cmd+Shift+R halten")
+        self.mic_hint.setStringValue_("F18 / F19 halten")
         self.mic_hint.setEditable_(False); self.mic_hint.setBezeled_(False)
         self.mic_hint.setDrawsBackground_(False); self.mic_hint.setAlignment_(1)
         self.mic_hint.setFont_(NSFont.systemFontOfSize_(10))
@@ -501,6 +455,54 @@ class TranscriptPanel(NSObject):
         self.ocr_hint.setFont_(NSFont.systemFontOfSize_(10))
         self.ocr_hint.setTextColor_(NSColor.secondaryLabelColor())
         content.addSubview_(self.ocr_hint)
+
+        # Sprach-Toggle (DE/EN) — kleines Pill oben rechts
+        self.lang_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 44, 22))
+        self.lang_btn.setBezelStyle_(1)  # NSBezelStyleRounded
+        self.lang_btn.setTitle_("DE")
+        self.lang_btn.setFont_(NSFont.boldSystemFontOfSize_(11))
+        self.lang_btn.setTarget_(self)
+        self.lang_btn.setAction_("langClicked:")
+        self.lang_btn.setToolTip_("Transkriptions-Sprache umschalten (DE/EN)")
+        content.addSubview_(self.lang_btn)
+
+        # VU-Meter (Pegel-Anzeige) zwischen Mic- und OCR-Button
+        self.vu_meter = NSLevelIndicator.alloc().initWithFrame_(NSMakeRect(0, 0, 90, 14))
+        self.vu_meter.setLevelIndicatorStyle_(1)  # NSLevelIndicatorStyleContinuousCapacity
+        self.vu_meter.setMinValue_(0.0)
+        self.vu_meter.setMaxValue_(1.0)
+        self.vu_meter.setWarningValue_(0.7)
+        self.vu_meter.setCriticalValue_(0.92)
+        self.vu_meter.setDoubleValue_(0.0)
+        self.vu_meter.setToolTip_("Mikrofon-Pegel (waehrend Aufnahme)")
+        content.addSubview_(self.vu_meter)
+
+        self.vu_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 90, 12))
+        self.vu_label.setStringValue_("Pegel")
+        self.vu_label.setEditable_(False); self.vu_label.setBezeled_(False)
+        self.vu_label.setDrawsBackground_(False); self.vu_label.setAlignment_(1)
+        self.vu_label.setFont_(NSFont.systemFontOfSize_(9))
+        self.vu_label.setTextColor_(NSColor.secondaryLabelColor())
+        content.addSubview_(self.vu_label)
+
+        # Gain-Slider (0..10x Verstaerkung)
+        self.gain_slider = NSSlider.alloc().initWithFrame_(NSMakeRect(0, 0, 90, 16))
+        self.gain_slider.setMinValue_(0.0)
+        self.gain_slider.setMaxValue_(10.0)
+        self.gain_slider.setDoubleValue_(1.0)
+        self.gain_slider.setTarget_(self)
+        self.gain_slider.setAction_("gainChanged:")
+        self.gain_slider.setContinuous_(True)
+        self.gain_slider.setToolTip_("Mikrofon-Verstaerkung (1x = unveraendert)")
+        content.addSubview_(self.gain_slider)
+
+        self.gain_label = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 90, 12))
+        self.gain_label.setStringValue_("Gain 1.0x")
+        self.gain_label.setEditable_(False); self.gain_label.setBezeled_(False)
+        self.gain_label.setDrawsBackground_(False); self.gain_label.setAlignment_(1)
+        self.gain_label.setFont_(NSFont.systemFontOfSize_(9))
+        self.gain_label.setTextColor_(NSColor.secondaryLabelColor())
+        content.addSubview_(self.gain_label)
 
         # Textfeld
         self.scroll_view = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 100))
@@ -579,7 +581,7 @@ class TranscriptPanel(NSObject):
         pad = 20
         inner_w = w - 2 * pad
         btn_size = 60
-        gap = 60
+        gap = 110  # Platz fuer VU-Meter + Gain-Slider zwischen Mic und OCR
 
         # Untere Zone: Status + Usage-Panel + 3 Aktions-Buttons
         status_h = 28
@@ -618,6 +620,20 @@ class TranscriptPanel(NSObject):
         self.ocr_btn.setFrame_(NSMakeRect(x_ocr, top_y, btn_size, btn_size))
         self.ocr_label.setFrame_(NSMakeRect(x_ocr - 40, top_y - lbl_h - 2, lbl_w, lbl_h))
         self.ocr_hint.setFrame_(NSMakeRect(x_ocr - 40, top_y - lbl_h - hint_h - 4, lbl_w, hint_h))
+
+        # Sprach-Toggle oben rechts in der Ecke
+        lang_w, lang_h = 44, 22
+        self.lang_btn.setFrame_(NSMakeRect(
+            w - pad - lang_w, h - lang_h - 10, lang_w, lang_h))
+
+        # VU-Block zwischen Mic und OCR — Slider-Knopf braucht volle Hoehe,
+        # Slider sitzt etwas unterhalb der Button-Bodenkante, mit Abstand zum Label
+        vu_w = 90
+        vu_x = x_mic + btn_size + (gap - vu_w) / 2
+        self.vu_label.setFrame_(NSMakeRect(vu_x, top_y + 50, vu_w, 10))
+        self.vu_meter.setFrame_(NSMakeRect(vu_x, top_y + 36, vu_w, 12))
+        self.gain_label.setFrame_(NSMakeRect(vu_x, top_y + 24, vu_w, 10))
+        self.gain_slider.setFrame_(NSMakeRect(vu_x, top_y - 7, vu_w, 22))
 
         # Mittlere Zone: Scrollview füllt den Rest
         scroll_top_y = btn_area_y + btn_h + 8
@@ -710,26 +726,45 @@ class TranscriptPanel(NSObject):
         if self.on_mic_click:
             self.on_mic_click()
 
-    def micHoldCheck_(self, timer):
-        """Wird HOLD_THRESHOLD Sek. nach mouseDown gefeuert.
+    @objc.IBAction
+    def langClicked_(self, sender):
+        if self.on_lang_toggle:
+            self.on_lang_toggle()
 
-        Wenn der Button noch gedrueckt ist, gilt es als Hold:
-        Aufnahme starten.
-        """
+    @objc.IBAction
+    def gainChanged_(self, sender):
+        val = float(sender.doubleValue())
         try:
-            btn = timer.userInfo() if hasattr(timer, "userInfo") else None
-            if btn is None:
-                btn = self.mic_btn
-            if btn.is_pressed():
-                btn.enter_hold()
-                if self.on_mic_hold_start:
-                    self.on_mic_hold_start()
+            self.gain_label.setStringValue_(f"Gain {val:.1f}x")
         except Exception:
-            log.exception("micHoldCheck_ Fehler")
+            pass
+        if self.on_gain_change:
+            self.on_gain_change(val)
 
-    def micHoldEnd_(self, sender):
-        if self.on_mic_hold_end:
-            self.on_mic_hold_end()
+    @objc.python_method
+    def set_vu_level(self, level: float):
+        """VU-Meter auf neuen Pegel setzen (0..1)."""
+        try:
+            self.vu_meter.setDoubleValue_(max(0.0, min(1.0, level)))
+        except Exception:
+            pass
+
+    @objc.python_method
+    def set_gain(self, gain: float):
+        """Slider + Label auf gespeicherten Gain-Wert setzen (ohne Callback)."""
+        try:
+            self.gain_slider.setDoubleValue_(gain)
+            self.gain_label.setStringValue_(f"Gain {gain:.1f}x")
+        except Exception:
+            pass
+
+    @objc.python_method
+    def set_lang_label(self, lang: str):
+        """UI-Beschriftung des Sprach-Buttons aktualisieren ('de' -> 'DE')."""
+        try:
+            self.lang_btn.setTitle_(lang.upper())
+        except Exception:
+            pass
 
     @objc.IBAction
     def ocrClicked_(self, sender):
@@ -791,9 +826,14 @@ class AudioTranskriptApp(rumps.App):
         self._text_was_edited = False
         self._target_app = None
         self.panel.on_mic_click = self._toggle_recording
-        self.panel.on_mic_hold_start = self._start_ptt_recording
-        self.panel.on_mic_hold_end = self._stop_ptt_recording
+        self.panel.on_lang_toggle = self._toggle_language
+        self.panel.on_gain_change = self._set_gain
         self.panel.on_ocr_click = self._do_screenshot_ocr
+        self._language = "de"  # Whisper-Sprache, per UI umschaltbar
+        self.panel.set_lang_label(self._language)
+        self._vu_timer = None
+        # Letzten Gain-Wert aus NSUserDefaults wiederherstellen
+        self._restore_gain()
         self.panel.on_copy_click = self._copy_text
         self.panel.on_insert_click = self._insert_panel_text
         self.panel.on_clear_click = self._clear_text
@@ -1024,6 +1064,49 @@ class AudioTranskriptApp(rumps.App):
         self._text_was_edited = False
         self.panel.set_status("Bereit")
 
+    # --- Mikrofon-Gain + VU-Meter ---
+
+    _GAIN_PREF_KEY = "mic_gain"
+
+    def _restore_gain(self):
+        """Letzten Gain-Wert laden und auf Recorder + UI anwenden."""
+        try:
+            defaults = NSUserDefaults.standardUserDefaults()
+            stored = defaults.objectForKey_(self._GAIN_PREF_KEY)
+            gain = float(stored) if stored is not None else 1.0
+        except Exception:
+            gain = 1.0
+        # Plausibilitaet (falls jemand den Pref manuell verbiegt)
+        gain = max(0.0, min(10.0, gain))
+        self.recorder.gain = gain
+        self.panel.set_gain(gain)
+        log.info("Mic-Gain wiederhergestellt: %.2fx", gain)
+
+    def _set_gain(self, value: float):
+        self.recorder.gain = float(value)
+        try:
+            NSUserDefaults.standardUserDefaults().setDouble_forKey_(
+                float(value), self._GAIN_PREF_KEY)
+        except Exception:
+            log.exception("Konnte Gain nicht speichern")
+        log.info("Mic-Gain gesetzt: %.2fx", value)
+
+    def _vu_tick(self, _):
+        try:
+            level = self.recorder.get_level() if self.recorder.is_recording else 0.0
+            self.panel.set_vu_level(level)
+        except Exception:
+            pass
+
+    # --- Sprach-Toggle (DE/EN) ---
+
+    def _toggle_language(self):
+        self._language = "en" if self._language == "de" else "de"
+        self.panel.set_lang_label(self._language)
+        log.info("Sprache umgeschaltet auf: %s", self._language)
+        self.panel.set_status(
+            f"Sprache: {self._language.upper()}")
+
     # --- Aufnahme: Toggle-Modus (F18 / Button) ---
 
     def _toggle_recording(self):
@@ -1053,6 +1136,9 @@ class AudioTranskriptApp(rumps.App):
         # 1-Sekunden-Tick: entscheidet dynamisch, wann ein Chunk geschnitten wird
         self._chunk_timer = rumps.Timer(self._transcribe_chunk, 1)
         self._chunk_timer.start()
+        # VU-Meter-Tick (10x pro Sekunde) — nur waehrend Aufnahme aktiv
+        self._vu_timer = rumps.Timer(self._vu_tick, 0.1)
+        self._vu_timer.start()
 
     def _stop_recording(self):
         """Aufnahme stoppen (gemeinsam fuer Toggle und PTT)."""
@@ -1061,6 +1147,10 @@ class AudioTranskriptApp(rumps.App):
         if self._chunk_timer:
             self._chunk_timer.stop()
             self._chunk_timer = None
+        if self._vu_timer:
+            self._vu_timer.stop()
+            self._vu_timer = None
+        self.panel.set_vu_level(0.0)
         self._is_transcribing_chunk = False
         if self._recording_timer:
             self._recording_timer.stop()
@@ -1117,7 +1207,7 @@ class AudioTranskriptApp(rumps.App):
 
             snapshot = self.recorder.get_audio_snapshot()
             buf_len = len(snapshot)
-            min_len = SAMPLE_RATE * 2
+            min_len = SAMPLE_RATE // 2  # 0.5 s — kurze Sequenzen werden nicht verworfen
             if buf_len < min_len:
                 return
 
@@ -1145,7 +1235,8 @@ class AudioTranskriptApp(rumps.App):
 
             def _run():
                 try:
-                    text, lang = self.transcriber.transcribe(audio)
+                    text, lang = self.transcriber.transcribe(
+                        audio, prev_text=prev_text, language=self._language)
 
                     def _update():
                         self._is_transcribing_chunk = False
@@ -1182,8 +1273,10 @@ class AudioTranskriptApp(rumps.App):
 
         def _run():
             try:
-                text, lang = self.transcriber.transcribe(audio)
-                log.info("final: %r", text[:60] if text else '')
+                text, lang = self.transcriber.transcribe(
+                    audio, prev_text=self._last_chunk_text,
+                    language=self._language)
+                log.info("final: %r (lang=%s)", text[:60] if text else '', lang)
                 _on_main(lambda: self._on_recording_finished(
                     text, lang))
             except Exception as e:

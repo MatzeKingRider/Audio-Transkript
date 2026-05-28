@@ -23,7 +23,7 @@ else:
     # large-v2 mit int8: deutlich bessere Qualitaet als medium, besonders fuer Deutsch
     WHISPER_MODEL = "medium"
 
-WHISPER_LANGUAGE = "de"
+WHISPER_LANGUAGE = "de"  # Default-Sprache; per UI umschaltbar auf "en"
 
 # Audio
 SAMPLE_RATE = 16000
@@ -34,7 +34,6 @@ HOTKEY_MIC_TOGGLE = "<f18>"   # Toggle: Start/Stop (einmal druecken)
 HOTKEY_OCR = "<f17>"          # Screenshot-OCR
 HOTKEY_PTT = "<f19>"          # Push-to-Talk (halten = Aufnahme, loslassen = Stopp)
 HOTKEY_OCR_ALT = "cmd+shift+o"
-HOTKEY_PTT_ALT = "cmd+shift+r"   # Cmd+Shift+R halten = PTT
 # F19 = Push-to-Talk (halten = Aufnahme, loslassen = Stopp) — in hotkeys.py
 
 # Claude Code Usage Monitor

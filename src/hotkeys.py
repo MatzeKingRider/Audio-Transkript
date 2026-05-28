@@ -10,7 +10,7 @@ log = logging.getLogger("AT")
 class HotkeyManager:
     """F17 = OCR, F18 = Toggle-Aufnahme, F19 = Push-to-Talk.
 
-    Alternativen: Cmd+Shift+O = OCR, Cmd+Shift+R = PTT.
+    Alternative: Cmd+Shift+O = OCR.
 
     Nutzt einen einzelnen keyboard.Listener (nicht GlobalHotKeys),
     weil zwei separate pynput-Listener auf macOS/Darwin crashen.
@@ -34,7 +34,7 @@ class HotkeyManager:
         )
         self._listener.daemon = True
         self._listener.start()
-        log.info("Hotkeys: F17=OCR, F18=Toggle, F19=PTT, Cmd+Shift+O=OCR, Cmd+Shift+R=PTT")
+        log.info("Hotkeys: F17=OCR, F18=Toggle, F19=PTT, Cmd+Shift+O=OCR")
 
     def stop(self):
         """Listener stoppen."""
@@ -45,7 +45,7 @@ class HotkeyManager:
     def _on_key_press(self, key):
         try:
             self._pressed_keys.add(key)
-            if key == keyboard.Key.f19 or self._is_ptt_combo(key):
+            if key == keyboard.Key.f19:
                 if not self._ptt_active and self._on_mic_ptt_start:
                     self._ptt_active = True
                     self._dispatch(self._on_mic_ptt_start)
@@ -60,7 +60,7 @@ class HotkeyManager:
 
     def _on_key_release(self, key):
         try:
-            if key == keyboard.Key.f19 or self._is_ptt_release_key(key):
+            if key == keyboard.Key.f19:
                 if self._ptt_active and self._on_mic_ptt_stop:
                     self._ptt_active = False
                     self._dispatch(self._on_mic_ptt_stop)
@@ -86,23 +86,10 @@ class HotkeyManager:
         return any(k in self._pressed_keys for k in (
             keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r))
 
-    def _is_ptt_combo(self, key):
-        # Cmd+Shift+R halten = PTT (kein Sonderzeichen, frei von VS Code + macOS)
-        c = getattr(key, "char", None)
-        return (c is not None and c.lower() == "r"
-                and self._is_cmd_pressed() and self._is_shift_pressed())
-
     def _is_ocr_combo(self, key):
         # Cmd+Shift+O = OCR
         return (getattr(key, "char", None) == "o"
                 and self._is_cmd_pressed() and self._is_shift_pressed())
-
-    def _is_ptt_release_key(self, key):
-        # Beim Loslassen von R, Cmd oder Shift soll PTT stoppen (Cmd+Shift+R)
-        c = getattr(key, "char", None)
-        return (c is not None and c.lower() == "r") or key in (
-            keyboard.Key.cmd, keyboard.Key.cmd_l, keyboard.Key.cmd_r,
-            keyboard.Key.shift, keyboard.Key.shift_l, keyboard.Key.shift_r)
 
     def _dispatch(self, callback):
         """Callback auf den Main-Thread dispatchen."""
