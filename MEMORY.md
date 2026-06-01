@@ -1,83 +1,94 @@
 # MEMORY — Audio Transkript
 
-## Aktueller Stand: v0.1.4 (Stabilisierung + VU-Meter + Gain)
+## Aktueller Stand: v0.1.5 (F19-Beep weg + KVM-Switch-Resilience)
 
-### Was in dieser Session getan wurde (2026-05-28)
+### Was in dieser Session getan wurde (2026-06-01)
 
-Diese Session war eine Regressions-Behebung von v0.1.3 plus neue Features.
-v0.1.3 hatte mehrere Probleme: Aufnahme brach zu früh ab, Mic-Button stoppte
-nicht auf den zweiten Klick, Transkription verlor Kontext zwischen Chunks,
-Satzende wurde abgeschnitten. Außerdem fehlten Pegel-Anzeige und
-Eingangs-Verstärkung für leise Mikros.
+Zwei Bugs gemeldet — F19-Warnton beim Push-to-Talk und kompletter App-Hänger
+nach KVM-Switch (Tastatur/Maus/Monitor zum anderen Rechner und zurück).
+Diagnose war zweistufig: erst dachten wir der Hotkey-Listener stirbt, am Ende
+stellte sich heraus dass sounddevice/PortAudio der Schuldige war.
 
-**Mic-Button-Bug (UI)**
-- Hold-Logik komplett entfernt — Race-Condition zwischen 250-ms-Hold-Timer
-  und Click-Erkennung machte den zweiten Klick unzuverlässig
-- `MicButton`-Klasse auf reines NSButton-Verhalten reduziert
-- Verdrahtung über Standard `setAction_("micClicked:")`, kein NSTimer mehr
-- `on_mic_hold_start`, `on_mic_hold_end`, `micHoldCheck_`, `micHoldEnd_`,
-  `is_pressed()`, `enter_hold()` entfernt aus `src/app.py`
-- Tooltip: "Klick = Aufnahme starten/stoppen. F19 halten = Push-to-Talk."
+**Bug 1: F19-Beep beim PTT**
 
-**Cmd+Shift+R komplett entfernt**
-- Kollidierte mit Browser-Hard-Reload (Chrome/Safari/Edge)
-- `_is_ptt_combo`, `_is_ptt_release_key` aus `src/hotkeys.py` gelöscht
-- `HOTKEY_PTT_ALT` aus `src/config.py` entfernt
-- Aktive Hotkeys: **F17 / Cmd+Shift+O = OCR, F18 = Toggle, F19 = PTT**
+- Ursache: pynput hört über die Accessibility-API mit, konsumiert das Event
+  aber NICHT systemweit. macOS findet keine UI-Action für F19 → NSBeep
+- Lösung: **CGEventTap** auf `kCGSessionEventTap` fängt F19 vor allen Apps ab
+  und gibt `None` zurück → Event verschwindet, kein Beep
+- Neue Datei `src/f19_tap.py` mit `F19EventTap`-Klasse (Quartz Low-Level)
+- Filter macOS-Auto-Repeat (`_is_pressed`-Flag); behandelt
+  `kCGEventTapDisabledByTimeout`/`...ByUserInput` mit Re-Enable
+- F19-Handling aus `src/hotkeys.py` entfernt (sonst doppelter Trigger);
+  `HotkeyManager`-Konstruktor schlanker (nur noch `on_mic_toggle` + `on_ocr_trigger`)
+- `HotkeyManager.is_listener_alive()` als Watchdog-Helper hinzugefügt
 
-**Transkriptions-Qualität**
-- `condition_on_previous_text=True` in beiden Backends (mlx + faster-whisper) —
-  Whisper behält Kontext zwischen Chunks
-- Neuer Parameter `prev_text` in `Transcriber.transcribe()` — die letzten
-  ~200 Zeichen werden via `_build_prompt()` an `initial_prompt` angehängt:
-  aufeinanderfolgende kurze Sequenzen werden logisch verkettet
-- VAD `min_silence_duration_ms`: 300 → **500 ms** (toleranter bei Atempausen)
-- `_trim_silence`: Schwelle 0.008 → **0.004**, Puffer am Ende 0.3 s → **0.6 s**
-  (leise Satzendungen gehen nicht mehr verloren)
-- Trailing `"..."`-Halluzination (Whisper-Ende-Token) wird in
-  `_filter_hallucinations()` zu sauberem `"."` ersetzt
-- `min_len` für Chunking in `_transcribe_chunk`: 2 s → **0.5 s**
-  (kurze Einsprech-Sequenzen werden nicht mehr verworfen)
-- `_process_final_chunk` und `_transcribe_chunk` geben `prev_text` und
-  `language` durch
+**Bug 2: App tot nach KVM-Switch (eigentliche Ursache)**
 
-**Sprach-Toggle (DE/EN) — UI**
-- Kleiner Pill-Button oben rechts im Panel, Beschriftung `"DE"` / `"EN"`
-- Action `langClicked_` → `on_lang_toggle` → `_toggle_language` im Controller
-- State `self._language` im `AudioTranskriptApp`, default `"de"`
-- `Transcriber.transcribe(..., language=...)` überschreibt Config-Default
-- `WHISPER_LANGUAGE` in `src/config.py` ist wieder `"de"` (Default, kein None)
-- Status-Zeile zeigt "Sprache: EN" beim Umschalten
+Iterative Diagnose über das Log war nötig:
+1. Erst Hotkey-Recovery via Wake-Notifications + Watchdog gebaut → **half nicht**
+2. Log zeigte: F18/F19 funktionieren WEITER (`_toggle_recording: is_recording=False`
+   wird mehrfach gefeuert), aber Aufnahme startet nicht — also nicht die Hotkeys
+3. Echte Ursache: `sounddevice`-Stream wird nach USB-Audio-Reconnect zum
+   **Zombie** — `start()` wirft keine Exception, liefert aber 0 Samples
+4. Fix: sounddevice/PortAudio MUSS bei jedem Aufnahme-Start frisch
+   reinitialisiert werden (`sd._terminate(); sd._initialize()`)
 
-**VU-Meter + Gain-Slider**
-- Zwischen Mic- und Screenshot-Button, horizontale Anordnung
-- `NSLevelIndicator` (continuous capacity, warning 0.7, critical 0.92)
-  zeigt Peak-Pegel während Aufnahme (10 Hz Update via `rumps.Timer`)
-- `NSSlider` 0…**10×** (von ursprünglich 4× erweitert), default 1×
-- `Recorder.gain` (float) wird in `_callback` auf jedes Sample angewendet —
-  wirkt sowohl auf VU als auch auf Whisper-Input
-- `Recorder._level` wird in `_callback` als `np.max(np.abs(...))` berechnet,
-  in `stop()` auf 0 zurückgesetzt
-- VU läuft NUR während Aufnahme (User-Entscheidung: kein dauerhafter oranger
-  Menüleisten-Punkt)
-- Gain wird in **NSUserDefaults** unter Key `"mic_gain"` persistiert
-  (`_set_gain` speichert, `_restore_gain` lädt beim App-Start),
-  Plausibilitäts-Clamp 0…10
-- Layout: `gap` zwischen Mic und OCR von 60 → **110 px**;
-  Slider-Frame h=22 mit y=`top_y - 7` (Knopf vollständig sichtbar);
-  Abstand Gain-Label ↔ Slider ausreichend groß
+Konkrete Code-Änderungen:
 
-**Mic-Hint gekürzt**
-- "F19 / Cmd+Shift+R halten" → **"F18 / F19 halten"** (passt jetzt ohne
-  Abschneiden in die schmalere Spalte)
+`src/recorder.py`:
+- `Recorder.start()` macht jetzt IMMER vor `_open_stream()`:
+  - `_force_close_stream()` (alten Zombie schließen)
+  - `_reinit_sounddevice()` (PortAudio frisch)
+  - `_chunks`, `_frames_received`, `_level` zurücksetzen
+- Gibt `True`/`False` zurück statt stumm zu scheitern
+- Neuer Frame-Counter `_frames_received` wird in `_callback` hochgezählt;
+  `get_frames_received()` als Public-Getter
+- Neuer Public-Wrapper `reinit_devices()` für Recovery von außen
+
+`src/app.py`:
+- `_start_recording` prüft `recorder.start()`-Return; bei Fehler Status
+  „Mikrofon nicht verfuegbar" (rot)
+- **Stream-Health-Check**: 500 ms nach Start einmaliger Timer, prüft
+  ob `frames_received > 0`. Bei 0 Frames → Aufnahme abbrechen, sounddevice
+  nochmal reinit, Status „Mikrofon zuruecksetzen — bitte erneut versuchen"
+- `_recover_after_wake` ruft jetzt zusätzlich `recorder.reinit_devices()` —
+  auch wenn Hotkeys leben, kann der Audio-Stream tot sein
+- `F19EventTap` wird neben `HotkeyManager` initialisiert und in `_quit` /
+  `_restart` mit aufgeräumt
+- `AppActivationObserver` abonniert zusätzlich:
+  - `NSWorkspaceDidWakeNotification` (Sleep-Wake)
+  - `NSWorkspaceScreensDidWakeNotification` (Display-Wake)
+  - `NSApplicationDidChangeScreenParametersNotification` (KVM-Switch —
+    feuert wenn Display-Setup sich ändert; läuft über das default
+    `NSNotificationCenter`, nicht NSWorkspace)
+- Recovery-Callback `_recover_after_wake` neu: stoppt + startet Hotkeys + Tap,
+  reinit sounddevice, bricht laufende Aufnahme ab, Status „Bereit (nach
+  KVM-Switch)"
+- **Watchdog-Timer** (alle 10 s) als Sicherheitsnetz: prüft
+  `hotkeys.is_listener_alive()` UND `_f19_tap.is_alive()` (letzteres nutzt
+  `CGEventTapIsEnabled()` — echter Health-Check, nicht nur Python-Handle)
+- Watchdog-Intervall war zwischenzeitlich auf 30 s, jetzt 10 s
 
 ### Offene Punkte
-- Modell-Drift Intel-Backend: `WHISPER_MODEL = "medium"` in `src/config.py:24`
-  (Memory v0.1.2 sagt large-v2, Kommentar im Code auch — könnte beabsichtigt
-  sein für Performance auf Intel)
+- Modell-Drift Intel-Backend (`WHISPER_MODEL = "medium"` in `src/config.py:24`)
+  — Memory v0.1.2 sagt large-v2; auf Apple Silicon (mlx) egal
 - Optional: Klick auf Usage-Panel öffnet Detail-Sheet (war seit v0.1.3 offen)
 
 ### Nächste Schritte (wenn gewünscht)
-- `git tag v0.1.4` als Release-Punkt setzen
-- Beobachten ob 0.6 s Trim-Puffer ausreicht oder noch erhöht werden muss
-- Beobachten ob VAD 500 ms zu spät schneidet (dann auf 350 ms zurück)
+- `git tag v0.1.5` als Release-Punkt setzen
+- F19-Beep in anderen Apps gegenchecken (User wollte das noch verifizieren)
+- Beobachten ob der Watchdog/Recovery zuverlässig greift; wenn nicht,
+  präventiver Reinit auch im Watchdog-Tick (alle 10 s sounddevice neu)
+
+### Wissen für künftige USB-Audio-Bugs
+- `sounddevice.InputStream` wirft nach USB-Reconnect keine Exception, der
+  Stream gilt als „läuft" und liefert 0 Samples. **Immer Frame-Counter
+  einbauen** als Health-Check.
+- `sd._terminate(); sd._initialize()` ist nicht öffentlich dokumentiert,
+  aber stabil und der einzig zuverlässige Weg PortAudio-State zu refreshen,
+  ohne den Python-Prozess neu zu starten.
+- macOS-Beep bei unbenutzten F-Tasten lässt sich NUR über CGEventTap mit
+  `return None` unterdrücken — pynput-Listener ohne `suppress=True` reicht
+  nicht.
+- KVM-Switches feuern oft KEINE `NSWorkspaceScreensDidWake`-Notification,
+  aber zuverlässig `NSApplicationDidChangeScreenParametersNotification`.

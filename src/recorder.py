@@ -1,9 +1,12 @@
 """Mikrofon-Aufnahme mit sounddevice."""
 
+import logging
 import threading
 import numpy as np
 import sounddevice as sd
 from src.config import SAMPLE_RATE, CHANNELS  # noqa: F401
+
+log = logging.getLogger("AT")
 
 
 class Recorder:
@@ -16,10 +19,46 @@ class Recorder:
         self.is_recording = False
         self.gain = 1.0           # Software-Verstaerkung; UI-Slider 0..4
         self._level = 0.0         # Letzter Peak-Wert (0..1) fuer VU-Meter
+        self._frames_received = 0  # Health-Check: hat der Stream Daten geliefert?
 
     def start(self):
-        """Aufnahme starten."""
+        """Aufnahme starten. ALLE vorigen Streams hart schliessen und
+        sounddevice/PortAudio reinitialisieren, bevor ein neuer Stream geoeffnet
+        wird — sonst bleibt nach KVM-Switch ein Zombie-Stream aktiv, der
+        zwar als 'gestartet' gilt, aber keine Audio-Samples liefert."""
+        if self.is_recording:
+            return True
+        # Alten Stream-Handle aufraeumen, falls noch da
+        self._force_close_stream()
+        # KVM-resistent: immer fresh PortAudio
+        self._reinit_sounddevice()
         self._chunks = []
+        self._frames_received = 0
+        self._level = 0.0
+        try:
+            self._open_stream()
+        except Exception as e:
+            log.error("recorder.start fehlgeschlagen: %s", e)
+            self._stream = None
+            self.is_recording = False
+            return False
+        self.is_recording = True
+        return True
+
+    def _force_close_stream(self):
+        if self._stream is None:
+            return
+        try:
+            self._stream.stop()
+        except Exception:
+            pass
+        try:
+            self._stream.close()
+        except Exception:
+            pass
+        self._stream = None
+
+    def _open_stream(self):
         self._stream = sd.InputStream(
             samplerate=SAMPLE_RATE,
             channels=CHANNELS,
@@ -27,7 +66,21 @@ class Recorder:
             callback=self._callback,
         )
         self._stream.start()
-        self.is_recording = True
+
+    @staticmethod
+    def _reinit_sounddevice():
+        """sounddevice cached die Device-Liste; nach KVM-Switch ist sie
+        veraltet. Force-Refresh via _terminate/_initialize."""
+        try:
+            sd._terminate()
+            sd._initialize()
+            log.info("sounddevice reinitialisiert")
+        except Exception:
+            log.exception("sounddevice reinit fehlgeschlagen")
+
+    def reinit_devices(self):
+        """Public Wrapper fuer das Recovery-Modul."""
+        self._reinit_sounddevice()
 
     def stop(self):
         """Aufnahme stoppen, Audio als numpy-Array zurückgeben."""
@@ -129,8 +182,14 @@ class Recorder:
         """Aktueller Peak-Pegel (0..1) fuer VU-Meter-Anzeige."""
         return self._level
 
+    def get_frames_received(self):
+        """Anzahl der Audio-Frames seit start(). 0 = Stream ist tot
+        (typisch nach KVM-Switch ohne Reinit)."""
+        return self._frames_received
+
     def _callback(self, indata, frames, time, status):
         """Stream-Callback — Gain anwenden, Pegel messen, Audio sammeln."""
+        self._frames_received += frames
         amplified = indata * self.gain if self.gain != 1.0 else indata
         # Peak fuer VU-Meter (schnelle Reaktion, kein Smoothing — UI macht das)
         if amplified.size:

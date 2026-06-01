@@ -8,7 +8,9 @@ log = logging.getLogger("AT")
 
 
 class HotkeyManager:
-    """F17 = OCR, F18 = Toggle-Aufnahme, F19 = Push-to-Talk.
+    """F17 = OCR, F18 = Toggle-Aufnahme. (F19 = PTT laeuft ueber F19EventTap,
+    nicht ueber pynput — sonst gibt macOS einen Warnton aus, weil das Event
+    nicht systemweit konsumiert wird.)
 
     Alternative: Cmd+Shift+O = OCR.
 
@@ -16,14 +18,10 @@ class HotkeyManager:
     weil zwei separate pynput-Listener auf macOS/Darwin crashen.
     """
 
-    def __init__(self, on_mic_toggle=None, on_mic_ptt_start=None,
-                 on_mic_ptt_stop=None, on_ocr_trigger=None):
+    def __init__(self, on_mic_toggle=None, on_ocr_trigger=None):
         self._on_mic_toggle = on_mic_toggle
-        self._on_mic_ptt_start = on_mic_ptt_start
-        self._on_mic_ptt_stop = on_mic_ptt_stop
         self._on_ocr_trigger = on_ocr_trigger
         self._listener = None
-        self._ptt_active = False
         self._pressed_keys = set()
 
     def start(self):
@@ -34,22 +32,25 @@ class HotkeyManager:
         )
         self._listener.daemon = True
         self._listener.start()
-        log.info("Hotkeys: F17=OCR, F18=Toggle, F19=PTT, Cmd+Shift+O=OCR")
+        log.info("Hotkeys: F17=OCR, F18=Toggle, Cmd+Shift+O=OCR (F19 via EventTap)")
 
     def stop(self):
         """Listener stoppen."""
         if self._listener:
-            self._listener.stop()
+            try:
+                self._listener.stop()
+            except Exception:
+                pass
             self._listener = None
+
+    def is_listener_alive(self):
+        """True wenn der Listener-Thread laeuft. Wird vom Watchdog geprueft."""
+        return self._listener is not None and self._listener.is_alive()
 
     def _on_key_press(self, key):
         try:
             self._pressed_keys.add(key)
-            if key == keyboard.Key.f19:
-                if not self._ptt_active and self._on_mic_ptt_start:
-                    self._ptt_active = True
-                    self._dispatch(self._on_mic_ptt_start)
-            elif key == keyboard.Key.f18:
+            if key == keyboard.Key.f18:
                 if self._on_mic_toggle:
                     self._dispatch(self._on_mic_toggle)
             elif key == keyboard.Key.f17 or self._is_ocr_combo(key):
@@ -60,15 +61,10 @@ class HotkeyManager:
 
     def _on_key_release(self, key):
         try:
-            if key == keyboard.Key.f19:
-                if self._ptt_active and self._on_mic_ptt_stop:
-                    self._ptt_active = False
-                    self._dispatch(self._on_mic_ptt_stop)
-        except Exception as e:
-            log.exception("Hotkey release Fehler: %s", e)
-        finally:
             if key in self._pressed_keys:
                 self._pressed_keys.remove(key)
+        except Exception as e:
+            log.exception("Hotkey release Fehler: %s", e)
 
     def _is_ctrl_pressed(self):
         return any(k in self._pressed_keys for k in (

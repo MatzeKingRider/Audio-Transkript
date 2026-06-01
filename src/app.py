@@ -41,6 +41,8 @@ from AppKit import (
     NSScreen,
     NSWorkspace,
     NSWorkspaceDidActivateApplicationNotification,
+    NSWorkspaceDidWakeNotification,
+    NSWorkspaceScreensDidWakeNotification,
     NSImageScaleProportionallyUpOrDown,
     NSLevelIndicator,
     NSSlider,
@@ -51,7 +53,8 @@ from AppKit import (
     NSForegroundColorAttributeName,
 )
 from PyObjCTools import AppHelper
-from Foundation import NSString, NSUserDefaults
+from Foundation import NSString, NSUserDefaults, NSNotificationCenter
+from AppKit import NSApplicationDidChangeScreenParametersNotification
 from src.config import (
     APP_NAME, ICON_PATH, PANEL_WIDTH, PANEL_HEIGHT, PANEL_TITLE,
     HOTKEY_MIC_TOGGLE, HOTKEY_OCR, SAMPLE_RATE,
@@ -64,6 +67,7 @@ from src.transcriber import Transcriber, dedupe_overlap
 from src.ocr import capture_screenshot, ocr_image
 from src.text_input import type_text, activate_app
 from src.hotkeys import HotkeyManager
+from src.f19_tap import F19EventTap
 
 
 def _on_main(fn):
@@ -788,16 +792,34 @@ class TranscriptPanel(NSObject):
 
 
 class AppActivationObserver(NSObject):
-    """Beobachtet App-Wechsel und merkt sich die letzte externe App."""
+    """Beobachtet App-Wechsel + System-Wake (Sleep/Display) und ruft einen
+    Recovery-Callback, damit der Hotkey-Listener nach KVM-Switch / Wake
+    wiederbelebt werden kann."""
 
     @objc.python_method
-    def setup(self, own_bundle_id):
+    def setup(self, own_bundle_id, on_wake=None):
         self._own_bundle_id = own_bundle_id
         self._last_external_app = None
+        self._on_wake = on_wake
         ws = NSWorkspace.sharedWorkspace()
-        ws.notificationCenter().addObserver_selector_name_object_(
+        nc = ws.notificationCenter()
+        nc.addObserver_selector_name_object_(
             self, "appDidActivate:",
             NSWorkspaceDidActivateApplicationNotification, None)
+        # System-Wake (Sleep-Wake) — manche KVMs triggern das mit
+        nc.addObserver_selector_name_object_(
+            self, "systemDidWake:",
+            NSWorkspaceDidWakeNotification, None)
+        # Display-Wake — wird bei KVM-Switch zurueck zuverlaessig gefeuert
+        nc.addObserver_selector_name_object_(
+            self, "systemDidWake:",
+            NSWorkspaceScreensDidWakeNotification, None)
+        # KVM-Switch loest *Screen-Parameter-Wechsel* aus (Display weg/wieder
+        # da). Diese Notification kommt vom NSApp-NotificationCenter, nicht
+        # von NSWorkspace.
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, "systemDidWake:",
+            NSApplicationDidChangeScreenParametersNotification, None)
         return self
 
     def appDidActivate_(self, notification):
@@ -808,6 +830,15 @@ class AppActivationObserver(NSObject):
                 self._last_external_app = app
         except Exception:
             pass
+
+    def systemDidWake_(self, notification):
+        try:
+            name = notification.name() if hasattr(notification, "name") else "?"
+            log.info("Wake-Notification empfangen: %s", name)
+            if self._on_wake:
+                self._on_wake()
+        except Exception:
+            log.exception("systemDidWake_ Fehler")
 
     @objc.python_method
     def last_external_app(self):
@@ -832,6 +863,7 @@ class AudioTranskriptApp(rumps.App):
         self._language = "de"  # Whisper-Sprache, per UI umschaltbar
         self.panel.set_lang_label(self._language)
         self._vu_timer = None
+        self._health_check_timer = None
         # Letzten Gain-Wert aus NSUserDefaults wiederherstellen
         self._restore_gain()
         self.panel.on_copy_click = self._copy_text
@@ -856,18 +888,33 @@ class AudioTranskriptApp(rumps.App):
         ]
 
         self._app_observer = AppActivationObserver.alloc().init().setup(
-            "com.matze.audio-transkript")
+            "com.matze.audio-transkript",
+            on_wake=lambda: _on_main(self._recover_after_wake))
 
-        # Hotkeys: F17=OCR, F18=Toggle, F19=Push-to-Talk
+        # Hotkeys: F17/F18/Cmd+Shift+O via pynput; F19 via CGEventTap
+        # (verhindert macOS-Warnton, da pynput das Event nicht konsumiert)
         self.hotkeys = HotkeyManager(
             on_mic_toggle=self._toggle_recording,
-            on_mic_ptt_start=self._start_ptt_recording,
-            on_mic_ptt_stop=self._stop_ptt_recording,
             on_ocr_trigger=self._do_screenshot_ocr,
         )
         self.hotkeys.start()
 
-        log.info("Hotkeys und Observer eingerichtet")
+        self._f19_tap = F19EventTap(
+            on_press=self._start_ptt_recording,
+            on_release=self._stop_ptt_recording,
+        )
+        self._f19_tap.start()
+
+        # Watchdog (10 s): falls Listener oder Tap nach KVM-Switch tot sind
+        # und keine Notification kam, hier mitnehmen. 10 s ist die maximale
+        # Wartezeit fuer den Nutzer, bevor F-Tasten wieder reagieren.
+        self._watchdog_timer = rumps.Timer(self._watchdog_tick, 10)
+        try:
+            self._watchdog_timer.start()
+        except Exception as e:
+            log.warning("Watchdog-Timer konnte nicht gestartet werden: %s", e)
+
+        log.info("Hotkeys, EventTap und Observer eingerichtet")
 
         # Claude-Code-Usage-Monitor: 60s-Refresh
         self._usage_timer = None
@@ -895,10 +942,99 @@ class AudioTranskriptApp(rumps.App):
         self.panel.set_status("Im Hintergrund (F18/F19 aktiv)")
         log.info("Hintergrund-Modus aktiviert")
 
+    def _check_stream_health(self, _):
+        """Wird 500 ms nach Aufnahme-Start einmalig gefeuert. Wenn der
+        sounddevice-Stream bis dahin 0 Frames geliefert hat, ist er ein
+        Zombie (typisch nach KVM-Switch) — Recovery + Status anzeigen."""
+        try:
+            if self._health_check_timer:
+                self._health_check_timer.stop()
+                self._health_check_timer = None
+        except Exception:
+            pass
+        try:
+            if not self.recorder.is_recording:
+                return
+            frames = self.recorder.get_frames_received()
+            log.info("Stream-Health-Check: %d Frames nach 500ms", frames)
+            if frames == 0:
+                log.warning("Stream tot (0 Frames) -> Audio-Recovery")
+                try:
+                    self._stop_recording()
+                except Exception:
+                    log.exception("Health-Check: stop_recording schlug fehl")
+                try:
+                    self.recorder.reinit_devices()
+                except Exception:
+                    log.exception("Health-Check: reinit_devices schlug fehl")
+                self.panel.set_status(
+                    "Mikrofon zuruecksetzen — bitte erneut versuchen",
+                    kind="recording")
+        except Exception:
+            log.exception("Stream-Health-Check Fehler")
+
+    # --- Recovery nach Sleep/Wake/KVM-Switch ---
+
+    def _recover_after_wake(self):
+        """Hotkey-Listener, F19-EventTap UND sounddevice nach KVM-Switch / Wake
+        wieder fit machen. Audio-Stream ist nach Device-Wechsel ueblicherweise
+        tot — wir muessen sounddevice intern refreshen, sonst schlaegt
+        recorder.start() stumm fehl."""
+        try:
+            log.info("Recovery: Hotkeys + F19-Tap + sounddevice neu starten")
+            if self.recorder.is_recording:
+                log.info("Recovery: laufende Aufnahme abbrechen")
+                try:
+                    self._stop_recording()
+                except Exception:
+                    log.exception("Recovery: stop_recording schlug fehl")
+            # sounddevice-Geraeteliste refreshen — DAS war der eigentliche
+            # KVM-Bug: Device-Cache zeigte tote USB-Audio-Devices
+            try:
+                self.recorder.reinit_devices()
+            except Exception:
+                log.exception("Recovery: sounddevice-Reinit schlug fehl")
+            # Pynput-Listener neu
+            try:
+                self.hotkeys.stop()
+            except Exception:
+                pass
+            self.hotkeys.start()
+            # F19-Tap neu
+            try:
+                self._f19_tap.stop()
+            except Exception:
+                pass
+            self._f19_tap.start()
+            try:
+                self.panel.set_status("Bereit (nach KVM-Switch)")
+            except Exception:
+                pass
+        except Exception:
+            log.exception("Recovery fehlgeschlagen")
+
+    def _watchdog_tick(self, _):
+        """Periodischer Health-Check als Sicherheitsnetz, falls keine
+        Wake-Notification kommt (manche KVMs sind sparsam mit Events)."""
+        try:
+            listener_dead = not self.hotkeys.is_listener_alive()
+            tap_dead = not self._f19_tap.is_alive()
+            if listener_dead or tap_dead:
+                log.warning(
+                    "Watchdog: listener_dead=%s tap_dead=%s -> Recovery",
+                    listener_dead, tap_dead)
+                self._recover_after_wake()
+        except Exception:
+            log.exception("Watchdog-Tick Fehler")
+
     def _restart(self, _):
         """App komplett neu starten."""
         log.info("Neustart angefordert")
         self.hotkeys.stop()
+        try:
+            self._f19_tap.stop()
+        except Exception:
+            pass
         if self.recorder.is_recording:
             self.recorder.stop()
         import subprocess
@@ -911,6 +1047,15 @@ class AudioTranskriptApp(rumps.App):
 
     def _quit(self, _):
         self.hotkeys.stop()
+        try:
+            self._f19_tap.stop()
+        except Exception:
+            pass
+        try:
+            if self._watchdog_timer:
+                self._watchdog_timer.stop()
+        except Exception:
+            pass
         rumps.quit_application()
 
     @rumps.clicked(APP_NAME)
@@ -1124,8 +1269,17 @@ class AudioTranskriptApp(rumps.App):
             return
         if not self._text_was_edited:
             self.panel.set_text("")
-        self.recorder.start()
+        if not self.recorder.start():
+            log.error("Audio-Aufnahme konnte nicht gestartet werden")
+            self.panel.set_status(
+                "Mikrofon nicht verfuegbar", kind="recording")
+            return
         self._recording_start = _time.time()
+        # Health-Check: prueft 500 ms nach Start, ob wirklich Samples
+        # ankommen. Falls nicht (Zombie-Stream nach KVM-Switch), Recovery.
+        self._health_check_timer = rumps.Timer(
+            self._check_stream_health, 0.5)
+        self._health_check_timer.start()
         self.panel.set_mic_icon(recording=True)
         self.panel.set_status("Aufnahme laeuft...", kind="recording")
         self._recording_timer = rumps.Timer(
@@ -1150,6 +1304,12 @@ class AudioTranskriptApp(rumps.App):
         if self._vu_timer:
             self._vu_timer.stop()
             self._vu_timer = None
+        if self._health_check_timer:
+            try:
+                self._health_check_timer.stop()
+            except Exception:
+                pass
+            self._health_check_timer = None
         self.panel.set_vu_level(0.0)
         self._is_transcribing_chunk = False
         if self._recording_timer:
