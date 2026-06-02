@@ -2,6 +2,7 @@
 
 import logging
 import threading
+import time as _time
 import numpy as np
 import sounddevice as sd
 from src.config import SAMPLE_RATE, CHANNELS  # noqa: F401
@@ -22,28 +23,51 @@ class Recorder:
         self._frames_received = 0  # Health-Check: hat der Stream Daten geliefert?
 
     def start(self):
-        """Aufnahme starten. ALLE vorigen Streams hart schliessen und
-        sounddevice/PortAudio reinitialisieren, bevor ein neuer Stream geoeffnet
-        wird — sonst bleibt nach KVM-Switch ein Zombie-Stream aktiv, der
-        zwar als 'gestartet' gilt, aber keine Audio-Samples liefert."""
+        """Aufnahme starten. Bei KVM-Switch braucht CoreAudio bis zu ~800ms
+        bis das USB-Mikro Samples liefert — wir oeffnen den Stream und warten
+        kurz, ob wirklich Frames eintreffen. Wenn nicht, hart schliessen und
+        bis zu 3x wiederholen (mit Reinit + kurzer Pause zwischen Versuchen).
+
+        Gibt True zurueck, sobald der Stream LIEFERT (nicht nur 'offen'), sonst
+        False. Standardfall blockiert <100ms; KVM-Fall bis ~2.5s. Das ist OK,
+        weil der User F19 drueckt und ohnehin auf 'Aufnahme laeuft' wartet."""
         if self.is_recording:
             return True
-        # Alten Stream-Handle aufraeumen, falls noch da
+        max_attempts = 3
+        for attempt in range(1, max_attempts + 1):
+            self._force_close_stream()
+            self._reinit_sounddevice()
+            self._chunks = []
+            self._frames_received = 0
+            self._level = 0.0
+            try:
+                self._open_stream()
+            except Exception as e:
+                log.warning("recorder._open_stream fehlgeschlagen "
+                            "(Versuch %d/%d): %s", attempt, max_attempts, e)
+                self._stream = None
+                if attempt < max_attempts:
+                    _time.sleep(0.4)
+                continue
+            # Auf erste Samples warten — bis zu 900ms, CoreAudio braucht nach
+            # KVM-Switch / USB-Reconnect oft 500-800ms bis das Device "warm" ist
+            t0 = _time.time()
+            deadline = t0 + 0.9
+            while _time.time() < deadline and self._frames_received == 0:
+                _time.sleep(0.02)
+            if self._frames_received > 0:
+                elapsed_ms = int((_time.time() - t0) * 1000)
+                log.info("recorder.start: Samples nach %dms (Versuch %d/%d)",
+                         elapsed_ms, attempt, max_attempts)
+                self.is_recording = True
+                return True
+            log.warning("recorder.start: 0 Frames nach 900ms "
+                        "(Versuch %d/%d) -> retry", attempt, max_attempts)
+            if attempt < max_attempts:
+                _time.sleep(0.4)
+        log.error("recorder.start: nach %d Versuchen kein Audio", max_attempts)
         self._force_close_stream()
-        # KVM-resistent: immer fresh PortAudio
-        self._reinit_sounddevice()
-        self._chunks = []
-        self._frames_received = 0
-        self._level = 0.0
-        try:
-            self._open_stream()
-        except Exception as e:
-            log.error("recorder.start fehlgeschlagen: %s", e)
-            self._stream = None
-            self.is_recording = False
-            return False
-        self.is_recording = True
-        return True
+        return False
 
     def _force_close_stream(self):
         if self._stream is None:

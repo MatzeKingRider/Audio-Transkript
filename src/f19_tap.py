@@ -15,6 +15,7 @@ from Quartz import (
     CGEventTapIsEnabled,
     CGEventGetIntegerValueField,
     CFMachPortCreateRunLoopSource,
+    CFMachPortInvalidate,
     CFRunLoopAddSource,
     CFRunLoopRemoveSource,
     CFRunLoopGetCurrent,
@@ -81,6 +82,14 @@ class F19EventTap:
             try:
                 CFRunLoopRemoveSource(
                     CFRunLoopGetCurrent(), self._source, kCFRunLoopCommonModes)
+            except Exception:
+                pass
+        # WICHTIG: Mach-Port invalidieren, sonst leakt der Tap im Kernel.
+        # macOS limitiert die Anzahl gleichzeitiger Taps pro Prozess —
+        # ohne Invalidate kapituliert das System nach ein paar Recoveries.
+        if self._tap is not None:
+            try:
+                CFMachPortInvalidate(self._tap)
             except Exception:
                 pass
         self._tap = None

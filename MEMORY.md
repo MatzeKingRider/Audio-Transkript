@@ -1,94 +1,126 @@
 # MEMORY — Audio Transkript
 
-## Aktueller Stand: v0.1.5 (F19-Beep weg + KVM-Switch-Resilience)
+## Aktueller Stand: v0.1.6 (KVM-Hänger gefixt + Restart-Bundle + Fenstergröße)
 
-### Was in dieser Session getan wurde (2026-06-01)
+### Was in dieser Session getan wurde (2026-06-02)
 
-Zwei Bugs gemeldet — F19-Warnton beim Push-to-Talk und kompletter App-Hänger
-nach KVM-Switch (Tastatur/Maus/Monitor zum anderen Rechner und zurück).
-Diagnose war zweistufig: erst dachten wir der Hotkey-Listener stirbt, am Ende
-stellte sich heraus dass sounddevice/PortAudio der Schuldige war.
+Drei Probleme nach v0.1.5 zu lösen: KVM-Switch hängte die App immer noch
+(plus: Neustart half gar nicht mehr), die Mac-App startete nach „Neustart"
+im Menü nicht wieder, und Fenstergröße ging beim Neustart verloren.
 
-**Bug 1: F19-Beep beim PTT**
+**Bug 1 — KVM-Switch tötete sounddevice + Mach-Port-Leak (v0.1.6 Hauptfix)**
 
-- Ursache: pynput hört über die Accessibility-API mit, konsumiert das Event
-  aber NICHT systemweit. macOS findet keine UI-Action für F19 → NSBeep
-- Lösung: **CGEventTap** auf `kCGSessionEventTap` fängt F19 vor allen Apps ab
-  und gibt `None` zurück → Event verschwindet, kein Beep
-- Neue Datei `src/f19_tap.py` mit `F19EventTap`-Klasse (Quartz Low-Level)
-- Filter macOS-Auto-Repeat (`_is_pressed`-Flag); behandelt
-  `kCGEventTapDisabledByTimeout`/`...ByUserInput` mit Re-Enable
-- F19-Handling aus `src/hotkeys.py` entfernt (sonst doppelter Trigger);
-  `HotkeyManager`-Konstruktor schlanker (nur noch `on_mic_toggle` + `on_ocr_trigger`)
-- `HotkeyManager.is_listener_alive()` als Watchdog-Helper hinzugefügt
+Diagnose im Code zeigte **vier strukturelle Schwachstellen**:
 
-**Bug 2: App tot nach KVM-Switch (eigentliche Ursache)**
+1. **`F19EventTap.stop()` rief kein `CFMachPortInvalidate`** —
+   Mach-Port leakte bei jeder Recovery im Kernel. macOS limitiert die
+   Anzahl gleichzeitiger Event-Taps pro Prozess → nach mehreren
+   KVM-Switches kapitulierte das System lautlos. Erklärt warum
+   irgendwann auch Neustart nicht mehr half.
+2. **`_recover_after_wake` ohne Reentrant-Sperre** — KVM-Switches feuern
+   typisch 3-5 Notifications zeitgleich (`DidChangeScreenParameters`,
+   `ScreensDidWake`, Watchdog). Jede Recovery rief `sd._terminate();
+   sd._initialize()` parallel → `coreaudiod` ging in einen kaputten
+   Zustand aus dem auch Process-Neustart nicht mehr rauskam.
+3. **Recovery rief `_stop_recording`** das einen Transcribe-Thread
+   startete, der mit dem direkt folgenden `sd._terminate()` kollidieren
+   konnte.
+4. **`_restart` stoppte Watchdog-Timer nicht** und nutzte
+   `subprocess.Popen('sleep 1 && open ...')` — wenn der alte Prozess
+   noch nicht weg war (Watchdog hing), startete macOS keine neue
+   Instanz (Single-Instance-Schutz).
 
-Iterative Diagnose über das Log war nötig:
-1. Erst Hotkey-Recovery via Wake-Notifications + Watchdog gebaut → **half nicht**
-2. Log zeigte: F18/F19 funktionieren WEITER (`_toggle_recording: is_recording=False`
-   wird mehrfach gefeuert), aber Aufnahme startet nicht — also nicht die Hotkeys
-3. Echte Ursache: `sounddevice`-Stream wird nach USB-Audio-Reconnect zum
-   **Zombie** — `start()` wirft keine Exception, liefert aber 0 Samples
-4. Fix: sounddevice/PortAudio MUSS bei jedem Aufnahme-Start frisch
-   reinitialisiert werden (`sd._terminate(); sd._initialize()`)
+Fixes:
+- `src/f19_tap.py`: `CFMachPortInvalidate(self._tap)` im `stop()` nach
+  `CFRunLoopRemoveSource`
+- `src/app.py`: `self._recovery_lock = threading.Lock()` +
+  `self._last_recovery_at` + **5 s Cooldown** in `_recover_after_wake`.
+  Mehrfach-Trigger werden mit „Cooldown aktiv, skip" geloggt.
+- `src/app.py`: Neue Methode `_cleanup_recording_ui()` (stoppt nur die
+  UI-Timer + Mic-Icon, OHNE Transkription). Recovery nutzt
+  `recorder._force_close_stream()` + `_cleanup_recording_ui()` statt
+  `_stop_recording()` — kein Transcribe-Thread-Race mit `sd._terminate`.
+- `src/app.py`: Neue gemeinsame Methode `_teardown_for_exit()` für
+  Quit + Restart (stoppt ALLE Timer inkl. Watchdog, F19-Tap mit
+  Invalidate, `recorder._force_close_stream`, `sd._terminate()`,
+  `time.sleep(0.2)`). `_quit` und `_restart` nutzen beide diese Methode.
+- `src/app.py`: Watchdog (`_watchdog_tick`) skipped wenn
+  `recorder.is_recording == True` — keine Kollision mit laufender Aufnahme.
 
-Konkrete Code-Änderungen:
+**Bug 2 — Mikrofon liefert nach KVM kurz keine Samples (Symptom: 0-Frames-
+Health-Check, „Mikrofon nicht verfügbar"-Status nach KVM)**
 
-`src/recorder.py`:
-- `Recorder.start()` macht jetzt IMMER vor `_open_stream()`:
-  - `_force_close_stream()` (alten Zombie schließen)
-  - `_reinit_sounddevice()` (PortAudio frisch)
-  - `_chunks`, `_frames_received`, `_level` zurücksetzen
-- Gibt `True`/`False` zurück statt stumm zu scheitern
-- Neuer Frame-Counter `_frames_received` wird in `_callback` hochgezählt;
-  `get_frames_received()` als Public-Getter
-- Neuer Public-Wrapper `reinit_devices()` für Recovery von außen
+Diagnose aus Live-Log: nach KVM-Switch öffnet `sd.InputStream` erfolgreich,
+aber CoreAudio braucht 500–800 ms bis das USB-Mikro „warm" ist und Samples
+liefert. Mein bisheriger Health-Check gab nach 500 ms auf und reinit-ete,
+ohne den Stream neu zu öffnen → nächster F19-Druck startete wieder bei 0.
 
-`src/app.py`:
-- `_start_recording` prüft `recorder.start()`-Return; bei Fehler Status
-  „Mikrofon nicht verfuegbar" (rot)
-- **Stream-Health-Check**: 500 ms nach Start einmaliger Timer, prüft
-  ob `frames_received > 0`. Bei 0 Frames → Aufnahme abbrechen, sounddevice
-  nochmal reinit, Status „Mikrofon zuruecksetzen — bitte erneut versuchen"
-- `_recover_after_wake` ruft jetzt zusätzlich `recorder.reinit_devices()` —
-  auch wenn Hotkeys leben, kann der Audio-Stream tot sein
-- `F19EventTap` wird neben `HotkeyManager` initialisiert und in `_quit` /
-  `_restart` mit aufgeräumt
-- `AppActivationObserver` abonniert zusätzlich:
-  - `NSWorkspaceDidWakeNotification` (Sleep-Wake)
-  - `NSWorkspaceScreensDidWakeNotification` (Display-Wake)
-  - `NSApplicationDidChangeScreenParametersNotification` (KVM-Switch —
-    feuert wenn Display-Setup sich ändert; läuft über das default
-    `NSNotificationCenter`, nicht NSWorkspace)
-- Recovery-Callback `_recover_after_wake` neu: stoppt + startet Hotkeys + Tap,
-  reinit sounddevice, bricht laufende Aufnahme ab, Status „Bereit (nach
-  KVM-Switch)"
-- **Watchdog-Timer** (alle 10 s) als Sicherheitsnetz: prüft
-  `hotkeys.is_listener_alive()` UND `_f19_tap.is_alive()` (letzteres nutzt
-  `CGEventTapIsEnabled()` — echter Health-Check, nicht nur Python-Handle)
-- Watchdog-Intervall war zwischenzeitlich auf 30 s, jetzt 10 s
+Fix in `src/recorder.py` (`Recorder.start()`):
+- Eingebaute **Retry-Schleife mit Sample-Polling**, max 3 Versuche
+- Pro Versuch: `_force_close_stream` → `_reinit_sounddevice` →
+  `_open_stream` → bis zu 900 ms warten ob `_frames_received > 0`
+- Bei Erfolg: `is_recording=True`, sofort return True
+- Bei Misserfolg: 400 ms Pause, nächster Versuch
+- Standardfall (Mikro warm): <100 ms blockierend
+- KVM-Fall: ~500–800 ms
+- Worst Case (3 Retries): ~3.9 s — akzeptabel, weil User auf „Aufnahme läuft"
+  wartet
+- `start()` gibt nur True zurück wenn Samples wirklich kamen, nicht nur
+  „Stream offen"
+- Log-Zeile bei Erfolg: `recorder.start: Samples nach Nms (Versuch N/3)`
+
+**Bug 3 — „Neustart" im Menü beendete die App, startete sie aber nicht neu**
+
+Ursache: `os.execv(sys.executable, [sys.executable] + sys.argv)` ersetzt
+den Prozess durch einen reinen Python-Interpreter. Bei einer aus dem
+gebundleten `.app` gestarteten Anwendung fehlt damit die
+LaunchServices-Integration (Menüleisten-Icon, Bundle-Identity), der
+Prozess beendet sich nach Sekundenbruchteil.
+
+Fix in `src/app.py` (`_restart`):
+- Neue Hilfsmethode `_detect_app_bundle_path()` via
+  `NSBundle.mainBundle().bundlePath()` — gibt den `.app`-Pfad zurück
+  wenn aus Bundle, sonst None
+- `_restart` zweigeteilt:
+  - **Bundle-Modus**: `subprocess.Popen(['/bin/sh', '-c',
+    'sleep 1 && open "/path/to/Audio Transkript.app"'])` + quit
+  - **Dev-Modus**: `os.execv` als Fallback
+- 1 s `sleep` gibt dem alten Prozess Zeit, sauber wegzugehen (sonst
+  Single-Instance-Block)
+- Klappt sauber dank `_teardown_for_exit()` aus Bug 1
+
+**Feature — Fenstergröße persistieren**
+
+In `src/app.py` (`TranscriptPanel`):
+- Neue Methoden `_load_panel_size()` + `_save_panel_size()` über
+  NSUserDefaults (Keys: `panel_width`, `panel_height`)
+- `_build_panel` lädt gespeicherte Größe bei jedem Start, Fallback auf
+  `PANEL_WIDTH`/`PANEL_HEIGHT` aus config
+- `windowDidResize_` ruft nach `_relayout` auch `_save_panel_size()`
+- Plausibilitäts-Clamp: nicht kleiner als Default, max 2000 px
 
 ### Offene Punkte
 - Modell-Drift Intel-Backend (`WHISPER_MODEL = "medium"` in `src/config.py:24`)
-  — Memory v0.1.2 sagt large-v2; auf Apple Silicon (mlx) egal
-- Optional: Klick auf Usage-Panel öffnet Detail-Sheet (war seit v0.1.3 offen)
+  — auf Apple Silicon (mlx) irrelevant
+- Optional: Klick auf Usage-Panel öffnet Detail-Sheet (seit v0.1.3 offen)
+- Falls KVM in seltenen Fällen doch noch hängt: nächster Hebel wäre
+  Subprocess-Isolation für den Audio-Stack (eigener Worker-Prozess,
+  Pipe zur Haupt-App)
 
 ### Nächste Schritte (wenn gewünscht)
-- `git tag v0.1.5` als Release-Punkt setzen
-- F19-Beep in anderen Apps gegenchecken (User wollte das noch verifizieren)
-- Beobachten ob der Watchdog/Recovery zuverlässig greift; wenn nicht,
-  präventiver Reinit auch im Watchdog-Tick (alle 10 s sounddevice neu)
+- `git tag v0.1.6` als Release-Punkt
+- Auch Fenster-**Position** persistieren (aktuell wird nur Größe gespeichert,
+  Position wird beim Start auf Bildschirmmitte gesetzt)
 
-### Wissen für künftige USB-Audio-Bugs
-- `sounddevice.InputStream` wirft nach USB-Reconnect keine Exception, der
-  Stream gilt als „läuft" und liefert 0 Samples. **Immer Frame-Counter
-  einbauen** als Health-Check.
-- `sd._terminate(); sd._initialize()` ist nicht öffentlich dokumentiert,
-  aber stabil und der einzig zuverlässige Weg PortAudio-State zu refreshen,
-  ohne den Python-Prozess neu zu starten.
-- macOS-Beep bei unbenutzten F-Tasten lässt sich NUR über CGEventTap mit
-  `return None` unterdrücken — pynput-Listener ohne `suppress=True` reicht
-  nicht.
-- KVM-Switches feuern oft KEINE `NSWorkspaceScreensDidWake`-Notification,
-  aber zuverlässig `NSApplicationDidChangeScreenParametersNotification`.
+### Wissen für künftige USB-Audio + KVM-Bugs
+- CGEventTap-Cleanup IMMER mit `CFMachPortInvalidate` — sonst leakt der
+  Mach-Port im Kernel
+- Recovery-Funktionen IMMER mit Reentrant-Lock + Cooldown — KVM-Switches
+  feuern 3-5 Notifications zeitgleich
+- `sd._terminate()` darf NICHT parallel zu einem aktiven Stream laufen —
+  zerstört `coreaudiod`-State
+- `os.execv` funktioniert NICHT für .app-Bundle-Restart — `open` via
+  Subprocess + `quit` ist der Weg
+- CoreAudio braucht nach USB-Reconnect 500-800 ms bis Samples kommen —
+  einfaches „Stream offen?" reicht nicht als Health-Check, Frame-Counter
+  muss tatsächlich hochzählen

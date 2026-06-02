@@ -320,8 +320,10 @@ class TranscriptPanel(NSObject):
             | NSWindowStyleMaskUtilityWindow
             | NSWindowStyleMaskFullSizeContentView
         )
+        # Gespeicherte Fenstergroesse laden (Fallback: Defaults aus config)
+        width, height = self._load_panel_size()
         self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, PANEL_WIDTH, PANEL_HEIGHT),
+            NSMakeRect(0, 0, width, height),
             style, NSBackingStoreBuffered, False)
         self.panel.setTitle_(PANEL_TITLE)
         self.panel.setTitlebarAppearsTransparent_(True)
@@ -369,8 +371,8 @@ class TranscriptPanel(NSObject):
             log.warning("Vibrancy/Appearance Setup fehlgeschlagen: %s", e)
 
         screen = NSScreen.mainScreen().frame()
-        x = (screen.size.width - PANEL_WIDTH) / 2
-        y = (screen.size.height - PANEL_HEIGHT) / 2
+        x = (screen.size.width - width) / 2
+        y = (screen.size.height - height) / 2
         self.panel.setFrameOrigin_((x, y))
 
         content = self.panel.contentView()
@@ -647,6 +649,40 @@ class TranscriptPanel(NSObject):
 
     def windowDidResize_(self, notification):
         self._relayout()
+        self._save_panel_size()
+
+    _PANEL_W_KEY = "panel_width"
+    _PANEL_H_KEY = "panel_height"
+
+    @objc.python_method
+    def _load_panel_size(self):
+        """Letzte Fenstergroesse aus NSUserDefaults; Fallback Defaults aus
+        config. Plausibilitaets-Clamp gegen verbogene Prefs."""
+        width, height = PANEL_WIDTH, PANEL_HEIGHT
+        try:
+            d = NSUserDefaults.standardUserDefaults()
+            w_obj = d.objectForKey_(self._PANEL_W_KEY)
+            h_obj = d.objectForKey_(self._PANEL_H_KEY)
+            if w_obj is not None:
+                width = float(w_obj)
+            if h_obj is not None:
+                height = float(h_obj)
+        except Exception:
+            log.exception("Panel-Size laden fehlgeschlagen")
+        # Vernuenftige Grenzen: nicht kleiner als Default, nicht groesser als 2000
+        width = max(PANEL_WIDTH, min(2000.0, width))
+        height = max(PANEL_HEIGHT, min(2000.0, height))
+        return width, height
+
+    @objc.python_method
+    def _save_panel_size(self):
+        try:
+            frame = self.panel.frame()
+            d = NSUserDefaults.standardUserDefaults()
+            d.setDouble_forKey_(float(frame.size.width), self._PANEL_W_KEY)
+            d.setDouble_forKey_(float(frame.size.height), self._PANEL_H_KEY)
+        except Exception:
+            log.exception("Panel-Size speichern fehlgeschlagen")
 
     @objc.python_method
     def set_mic_icon(self, recording=False):
@@ -864,6 +900,10 @@ class AudioTranskriptApp(rumps.App):
         self.panel.set_lang_label(self._language)
         self._vu_timer = None
         self._health_check_timer = None
+        # Recovery-Schutz: Reentrant-Lock + Cooldown gegen Recovery-Spam
+        # (KVM-Switch feuert mehrere Notifications + Watchdog gleichzeitig)
+        self._recovery_lock = threading.Lock()
+        self._last_recovery_at = 0.0
         # Letzten Gain-Wert aus NSUserDefaults wiederherstellen
         self._restore_gain()
         self.panel.on_copy_click = self._copy_text
@@ -975,21 +1015,55 @@ class AudioTranskriptApp(rumps.App):
 
     # --- Recovery nach Sleep/Wake/KVM-Switch ---
 
+    def _cleanup_recording_ui(self):
+        """Setzt UI-Timer + Mic-Icon zurueck OHNE Final-Transkription
+        anzustossen. Wird in der Recovery genutzt, weil die laufende
+        Aufnahme nach KVM-Switch eh kaputt ist."""
+        for attr in ("_chunk_timer", "_vu_timer", "_recording_timer",
+                     "_health_check_timer"):
+            t = getattr(self, attr, None)
+            if t is not None:
+                try:
+                    t.stop()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        self._is_transcribing_chunk = False
+        try:
+            self.panel.set_vu_level(0.0)
+            self.panel.set_mic_icon(recording=False)
+        except Exception:
+            pass
+
     def _recover_after_wake(self):
         """Hotkey-Listener, F19-EventTap UND sounddevice nach KVM-Switch / Wake
-        wieder fit machen. Audio-Stream ist nach Device-Wechsel ueblicherweise
-        tot — wir muessen sounddevice intern refreshen, sonst schlaegt
-        recorder.start() stumm fehl."""
+        wieder fit machen. Geschuetzt durch Reentrant-Lock + 5s-Cooldown —
+        sonst feuern wir bei einem KVM-Switch 3-5x parallel und reissen
+        PortAudio in einen Zustand aus dem auch ein Process-Neustart nicht
+        mehr rauskommt."""
+        if not self._recovery_lock.acquire(blocking=False):
+            log.info("Recovery: laeuft bereits, skip")
+            return
         try:
+            now = _time.time()
+            if now - self._last_recovery_at < 5.0:
+                log.info("Recovery: Cooldown aktiv, skip "
+                         "(letzte vor %.1fs)", now - self._last_recovery_at)
+                return
+            self._last_recovery_at = now
             log.info("Recovery: Hotkeys + F19-Tap + sounddevice neu starten")
+            # Laufende Aufnahme HART abreissen — KEIN _stop_recording, weil
+            # das einen Transcribe-Thread startet, der mit sd._terminate
+            # kollidieren wuerde
             if self.recorder.is_recording:
-                log.info("Recovery: laufende Aufnahme abbrechen")
+                log.info("Recovery: laufende Aufnahme abbrechen (hard)")
                 try:
-                    self._stop_recording()
+                    self.recorder._force_close_stream()
                 except Exception:
-                    log.exception("Recovery: stop_recording schlug fehl")
-            # sounddevice-Geraeteliste refreshen — DAS war der eigentliche
-            # KVM-Bug: Device-Cache zeigte tote USB-Audio-Devices
+                    log.exception("Recovery: _force_close_stream schlug fehl")
+                self.recorder.is_recording = False
+                self._cleanup_recording_ui()
+            # sounddevice-Geraeteliste refreshen
             try:
                 self.recorder.reinit_devices()
             except Exception:
@@ -1000,7 +1074,7 @@ class AudioTranskriptApp(rumps.App):
             except Exception:
                 pass
             self.hotkeys.start()
-            # F19-Tap neu
+            # F19-Tap neu (mit Mach-Port-Invalidate im stop)
             try:
                 self._f19_tap.stop()
             except Exception:
@@ -1012,11 +1086,16 @@ class AudioTranskriptApp(rumps.App):
                 pass
         except Exception:
             log.exception("Recovery fehlgeschlagen")
+        finally:
+            self._recovery_lock.release()
 
     def _watchdog_tick(self, _):
-        """Periodischer Health-Check als Sicherheitsnetz, falls keine
-        Wake-Notification kommt (manche KVMs sind sparsam mit Events)."""
+        """Periodischer Health-Check als Sicherheitsnetz. Nur wenn KEINE
+        Aufnahme laeuft — sonst wuerden wir mit dem Stream-Health-Check
+        kollidieren oder eine gesunde Aufnahme abreissen."""
         try:
+            if self.recorder.is_recording:
+                return
             listener_dead = not self.hotkeys.is_listener_alive()
             tap_dead = not self._f19_tap.is_alive()
             if listener_dead or tap_dead:
@@ -1027,35 +1106,84 @@ class AudioTranskriptApp(rumps.App):
         except Exception:
             log.exception("Watchdog-Tick Fehler")
 
-    def _restart(self, _):
-        """App komplett neu starten."""
-        log.info("Neustart angefordert")
-        self.hotkeys.stop()
+    def _teardown_for_exit(self):
+        """Alle Subsysteme sauber herunterfahren — gemeinsam fuer Quit + Restart.
+        Wichtig: F19-Tap mit Mach-Port-Invalidate (siehe f19_tap.stop), und
+        PortAudio kontrolliert terminieren, damit der naechste Process
+        sauber starten kann."""
+        for attr in ("_watchdog_timer", "_health_check_timer", "_vu_timer",
+                     "_chunk_timer", "_recording_timer", "_usage_timer"):
+            t = getattr(self, attr, None)
+            if t is not None:
+                try:
+                    t.stop()
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+        try:
+            self.hotkeys.stop()
+        except Exception:
+            pass
         try:
             self._f19_tap.stop()
         except Exception:
             pass
-        if self.recorder.is_recording:
-            self.recorder.stop()
-        import subprocess
-        # Shell-Befehl: 1 Sek. warten, dann App oeffnen
-        # Laeuft unabhaengig vom aktuellen Prozess weiter
-        subprocess.Popen(
-            'sleep 1 && open "/Applications/Audio Transkript.app"',
-            shell=True)
-        rumps.quit_application()
+        try:
+            self.recorder._force_close_stream()
+            self.recorder.is_recording = False
+        except Exception:
+            pass
+        try:
+            import sounddevice as sd
+            sd._terminate()
+        except Exception:
+            pass
+        # PortAudio Zeit geben, das Device freizugeben
+        _time.sleep(0.2)
+
+    @staticmethod
+    def _detect_app_bundle_path():
+        """Wenn die App aus einem .app-Bundle laeuft, gib dessen Pfad zurueck;
+        sonst None (= Dev-Modus aus Source)."""
+        try:
+            from Foundation import NSBundle
+            path = str(NSBundle.mainBundle().bundlePath() or "")
+            if path.endswith(".app") and os.path.isdir(path):
+                return path
+        except Exception:
+            pass
+        return None
+
+    def _restart(self, _):
+        """App komplett neu starten. Im .app-Bundle via 'open' (sonst fehlt
+        nach execv die LaunchServices-Integration und das Menuleisten-Icon
+        verschwindet sofort wieder). Im Dev-Modus per os.execv."""
+        log.info("Neustart angefordert")
+        self._teardown_for_exit()
+        bundle = self._detect_app_bundle_path()
+        if bundle:
+            log.info("Restart via 'open %s'", bundle)
+            import subprocess
+            try:
+                # sleep 1: alter Prozess muss wirklich weg sein, sonst
+                # macht macOS-Single-Instance keinen neuen Process auf
+                subprocess.Popen(
+                    ['/bin/sh', '-c', f'sleep 1 && open "{bundle}"'])
+            except Exception:
+                log.exception("subprocess.Popen('open ...') schlug fehl")
+            rumps.quit_application()
+            return
+        log.info("Restart via os.execv (Dev-Modus)")
+        import sys
+        try:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
+        except Exception:
+            log.exception("os.execv fehlgeschlagen")
+            rumps.quit_application()
 
     def _quit(self, _):
-        self.hotkeys.stop()
-        try:
-            self._f19_tap.stop()
-        except Exception:
-            pass
-        try:
-            if self._watchdog_timer:
-                self._watchdog_timer.stop()
-        except Exception:
-            pass
+        log.info("Beenden angefordert")
+        self._teardown_for_exit()
         rumps.quit_application()
 
     @rumps.clicked(APP_NAME)
