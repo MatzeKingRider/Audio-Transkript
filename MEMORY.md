@@ -1,5 +1,84 @@
 # MEMORY — Audio Transkript
 
+## Session 2026-06-17 — v0.1.7: Erkennung + Clipboard-Fix + Training-Reiter
+
+### Warum
+Drei Beschwerden vom Nutzer: (1) Eigennamen falsch erkannt — „Claude Code"
+→ „Cloud Code", „raaco" → „Raku"; (2) beim Einfügen landet manchmal der
+ALTE Zwischenablage-Inhalt im Ziel; (3) Wunsch, Begriffe selbst zu pflegen
+(„Reiter Training"). Nur Apple-Silicon-Variante relevant (large-v3 bleibt —
+kein Modellwechsel).
+
+### Was gemacht wurde
+- **Neuer Vokabular-Speicher** `src/vocabulary.py`: persistente JSON unter
+  `~/Library/Application Support/AudioTranskript/vocabulary.json`. Einträge
+  `{wrong, right}`; `right` (Pflicht) speist Whisper-Prompt + Korrektur,
+  `wrong` (optional) löst Post-Processing-Ersetzung aus. Seedet beim ersten
+  Start aus den config.py-Defaults (`WHISPER_PROMPT` + `WORD_CORRECTIONS`).
+  API: `prompt_terms()` (längenbegrenzt ~200 Zeichen gegen Halluzination),
+  `corrections()`, `add/remove/reload/entries`. Modul-Cache → Änderungen
+  wirken ohne Neustart.
+- **config.py**: `WHISPER_PROMPT` jetzt mit „Claude Code"; neue Korrekturen
+  `cloud code`/`claude code` → „Claude Code", `raku/rakku/rakuh` → „raaco".
+  Beide bleiben nur noch Default-Seed.
+- **transcriber.py**: `_build_prompt`, `_fix_spacing` und `transcribe_quick`
+  ziehen aus `vocabulary`. Korrekturen jetzt mit **Wortgrenzen** (`\b…\b`,
+  kein Über-Treffer mitten im Wort) + **Callable-Ersatz** (Sonderzeichen-sicher).
+- **Clipboard-Bug** (`src/text_input.py` + `src/app.py`): (a) Modul-`Lock`
+  serialisiert parallele Einfüge-Threads (Live-Insert während Aufnahme
+  überschrieb sich die Clipboard-Sicherung); (b) Wartezeit vor Restore
+  `0.1 → 0.3 s` (Ziel-App las Clipboard erst nach dem Restore → alter Inhalt);
+  (c) Leer-Text-Schutz in `type_text` + `_insert_in_target`.
+- **Reiter „Training"** (`src/app.py`): neue `TrainingPanel`-Klasse =
+  eigenes NSPanel (kein eingebetteter Tab — Hauptpanel ist voll, frame-basiert,
+  kein NSTabView). Geöffnet über neuen Menüeintrag „Training…". Eingabezeile
+  (wrong optional / right Pflicht) + NSTableView-Liste + „Markierten löschen".
+
+### Fertig
+- Automatisiert verifiziert: `py_compile` aller Dateien, voller `import src.app`
+  inkl. ObjC-Registrierung TrainingPanel, Funktionstest (Seed, Korrekturen
+  case-insensitive, Wortgrenzen schützen „Rakuten", add() sofort wirksam,
+  JSON-Persistenz) — alles grün.
+- Dabei Folgefehler gefunden+gefixt: `transcribe_quick` referenzierte noch
+  das entfernte `WHISPER_PROMPT`.
+
+### Offen / vom Nutzer noch live zu testen (braucht GUI + Mikro)
+- „Claude Code"/„raaco" diktieren → korrekt; Clipboard-Test (kopierter Inhalt
+  bleibt erhalten, kein Fremd-Einfügen); Training-Fenster Add/Liste/Löschen +
+  Persistenz über Neustart.
+- Entscheidung offen: echter eingebetteter Tab statt separatem Fenster (größerer
+  UI-Umbau) — nur falls gewünscht.
+
+### Nebenbefund (nicht geändert)
+- `pyproject.toml` version steht auf `0.1.1` (driftet, Releases laufen über
+  Commit-Message-Tags `v0.1.x`). Pre-existing in-flight in diesem Commit
+  mitgenommen: hotkeys.py-Refactor + `pynput`-Entfernung aus pyproject.
+- Untracked NICHT committet: `2026-04-22 19.28.42.jpg` (verirrtes Foto),
+  `inspect_macbook.sh` (Diagnose-Skript) — liegen weiter auf der Platte.
+
+## Session 2026-06-17 — Windows-Übergabe-Prompt erstellt
+
+Kein Code geändert. Ziel: App an einen Dritten weitergeben, der sie mit
+Claude Code **von Grund auf neu für Windows** baut (reine Windows-Variante,
+KEIN Altcode-Transfer, kein Repo-Sharing).
+
+- **Deliverable:** `outputs/windows-neuentwicklung-prompt.md` — eine
+  einzige Markdown-Datei: kurze Benutzungs-Anleitung + vollständiger,
+  copy-paste-fertiger Prompt für Claude Code (Block `=== PROMPT START ===`
+  bis `=== PROMPT ENDE ===`).
+- Prompt ist self-contained: kompletter Funktionsumfang + über v0.1.1–v0.1.6
+  gelernte Verhaltensweisen (Smart Chunking/Pausenerkennung,
+  Halluzinations-Filter, VU-Meter, Gain 0–10×, DE/EN, Geräte-Resilienz,
+  persistente Settings, Autostart) sind eingearbeitet.
+- Windows-Mapping im Prompt: rumps/AppKit → PySide6, CGEventTap → `keyboard`,
+  Apple Vision → Windows-eigene OCR (`winsdk`), faster-whisper bleibt,
+  py2app → PyInstaller. Hinweis: F17–F19 gibt's auf Windows nicht → Hotkeys
+  soll Claude mit dem Empfänger abstimmen.
+- Prompt ist auf Deutsch. Offen/optional: englische Fassung, falls der
+  Empfänger kein Deutsch spricht.
+
+Mac-Code, Repo und Git-Status unverändert.
+
 ## Aktueller Stand: v0.1.6 (KVM-Hänger gefixt + Restart-Bundle + Fenstergröße)
 
 ### Was in dieser Session getan wurde (2026-06-02)

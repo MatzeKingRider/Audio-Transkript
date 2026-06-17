@@ -4,9 +4,10 @@ import threading
 import numpy as np
 import re
 from src.config import (
-    WHISPER_BACKEND, WHISPER_MODEL, WHISPER_LANGUAGE, WHISPER_PROMPT,
-    SAMPLE_RATE, WORD_CORRECTIONS,
+    WHISPER_BACKEND, WHISPER_MODEL, WHISPER_LANGUAGE,
+    SAMPLE_RATE,
 )
+from src import vocabulary
 
 # Whisper halluziniert diese Phrasen bei Stille, Rauschen oder Aufnahme-Ende.
 # Exakte Matches (nach lowercase + strip von Satzzeichen):
@@ -202,8 +203,8 @@ class Transcriber:
 
     @staticmethod
     def _build_prompt(prev_text: str) -> str:
-        """Initial-Prompt = raaco-Terme + letzte ~200 Zeichen vom vorigen Chunk."""
-        base = WHISPER_PROMPT
+        """Initial-Prompt = gepflegte Begriffe + letzte ~200 Zeichen vom vorigen Chunk."""
+        base = vocabulary.prompt_terms()
         if not prev_text:
             return base
         tail = prev_text.strip()
@@ -220,9 +221,13 @@ class Transcriber:
         # (damit nachfolgende Aufnahmen nicht am Satzzeichen kleben)
         if text and text[-1] in '.!?;:,':
             text += ' '
-        # Wort-Korrekturen (case-insensitive ersetzen)
-        for wrong, right in WORD_CORRECTIONS.items():
-            text = re.sub(re.escape(wrong), right, text, flags=re.IGNORECASE)
+        # Wort-Korrekturen (case-insensitive, nur ganze Woerter).
+        # Callable-Ersatz, damit Sonderzeichen im "richtig"-Text nicht als
+        # Regex-Backreference interpretiert werden.
+        for wrong, right in vocabulary.corrections().items():
+            pattern = r'\b' + re.escape(wrong) + r'\b'
+            text = re.sub(pattern, lambda m, r=right: r, text,
+                          flags=re.IGNORECASE)
         return text
 
     @staticmethod
@@ -311,10 +316,11 @@ class Transcriber:
         if not self._lock.acquire(blocking=False):
             return ""
         try:
+            prompt = vocabulary.prompt_terms()
             if WHISPER_BACKEND == "mlx":
-                text, _ = self._transcribe_mlx(audio, WHISPER_PROMPT, WHISPER_LANGUAGE)
+                text, _ = self._transcribe_mlx(audio, prompt, WHISPER_LANGUAGE)
             else:
-                text, _ = self._transcribe_faster(audio, WHISPER_PROMPT, WHISPER_LANGUAGE)
+                text, _ = self._transcribe_faster(audio, prompt, WHISPER_LANGUAGE)
             return text
         finally:
             self._lock.release()

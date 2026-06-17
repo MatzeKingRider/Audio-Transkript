@@ -42,15 +42,22 @@ CLAUDE_USAGE_MONITOR_ENABLED = True
 # Whisper Initial Prompt — steuert Schreibweisen.
 # ACHTUNG: Whisper halluziniert den Prompt zurueck wenn er zu lang ist.
 # Daher nur ein kurzer Beispielsatz mit den wichtigsten Schreibweisen.
-WHISPER_PROMPT = "raaco, Boxxser, CarryLite, HandyBox."
+# HINWEIS: Ab v0.1.7 nur noch Default-Seed — die App pflegt das Vokabular in
+# ~/Library/Application Support/AudioTranskript/vocabulary.json (Reiter "Training").
+WHISPER_PROMPT = "Claude Code, raaco, Boxxser, CarryLite, HandyBox."
 
 # Woerter die immer in einer bestimmten Schreibweise erscheinen sollen.
-# Format: {falsch_lowercase: richtig}
+# Format: {falsch_lowercase: richtig}. Nur noch Default-Seed (siehe oben).
 WORD_CORRECTIONS = {
+    "cloud code": "Claude Code",
+    "claude code": "Claude Code",   # Schreibweise erzwingen
     "raco": "raaco",
     "raaco": "raaco",   # Gross -> klein
     "rako": "raaco",
     "racko": "raaco",
+    "raku": "raaco",
+    "rakku": "raaco",
+    "rakuh": "raaco",
     "boxser": "Boxxser",
     "boxxer": "Boxxser",
     "carrylite": "CarryLite",

@@ -31,6 +31,7 @@ from AppKit import (
     NSMakeSize,
     NSBezierPath,
     NSFloatingWindowLevel,
+    NSNormalWindowLevel,
     NSWindowStyleMaskTitled,
     NSWindowStyleMaskClosable,
     NSWindowStyleMaskResizable,
@@ -62,6 +63,7 @@ from src.config import (
     CLAUDE_USAGE_MONITOR_ENABLED,
 )
 from src import claude_usage
+from src import vocabulary
 from src.recorder import Recorder
 from src.transcriber import Transcriber, dedupe_overlap
 from src.ocr import capture_screenshot, ocr_image
@@ -300,6 +302,7 @@ class TranscriptPanel(NSObject):
     def setup(self):
         self.on_mic_click = None
         self.on_lang_toggle = None
+        self.on_pin_toggle = None
         self.on_gain_change = None  # callback(new_gain: float)
         self.on_ocr_click = None
         self.on_copy_click = None
@@ -472,6 +475,18 @@ class TranscriptPanel(NSObject):
         self.lang_btn.setToolTip_("Transkriptions-Sprache umschalten (DE/EN)")
         content.addSubview_(self.lang_btn)
 
+        # Pin-Toggle (Floating-Modus an/aus) — links neben dem Sprach-Button
+        self.pin_btn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 52, 22))
+        self.pin_btn.setBezelStyle_(1)  # NSBezelStyleRounded
+        self.pin_btn.setTitle_("Oben")
+        self.pin_btn.setFont_(NSFont.boldSystemFontOfSize_(11))
+        self.pin_btn.setTarget_(self)
+        self.pin_btn.setAction_("pinClicked:")
+        self.pin_btn.setToolTip_(
+            "Vordergrund/Hintergrund umschalten: 'Oben' = Panel schwebt immer "
+            "ueber anderen Apps, 'Frei' = normales Fensterverhalten")
+        content.addSubview_(self.pin_btn)
+
         # VU-Meter (Pegel-Anzeige) zwischen Mic- und OCR-Button
         self.vu_meter = NSLevelIndicator.alloc().initWithFrame_(NSMakeRect(0, 0, 90, 14))
         self.vu_meter.setLevelIndicatorStyle_(1)  # NSLevelIndicatorStyleContinuousCapacity
@@ -629,8 +644,14 @@ class TranscriptPanel(NSObject):
 
         # Sprach-Toggle oben rechts in der Ecke
         lang_w, lang_h = 44, 22
-        self.lang_btn.setFrame_(NSMakeRect(
-            w - pad - lang_w, h - lang_h - 10, lang_w, lang_h))
+        lang_x = w - pad - lang_w
+        lang_y = h - lang_h - 10
+        self.lang_btn.setFrame_(NSMakeRect(lang_x, lang_y, lang_w, lang_h))
+
+        # Pin-Toggle (Floating/Frei) direkt links neben dem Sprach-Button
+        pin_w = 52
+        self.pin_btn.setFrame_(NSMakeRect(
+            lang_x - pin_w - 6, lang_y, pin_w, lang_h))
 
         # VU-Block zwischen Mic und OCR — Slider-Knopf braucht volle Hoehe,
         # Slider sitzt etwas unterhalb der Button-Bodenkante, mit Abstand zum Label
@@ -651,6 +672,11 @@ class TranscriptPanel(NSObject):
         self._relayout()
         self._save_panel_size()
 
+    def windowDidEndLiveResize_(self, notification):
+        # Mancher Resize-Flow schickt nur DidEndLiveResize, nicht DidResize.
+        # Doppelt speichern schadet nicht.
+        self._save_panel_size()
+
     _PANEL_W_KEY = "panel_width"
     _PANEL_H_KEY = "panel_height"
 
@@ -659,28 +685,42 @@ class TranscriptPanel(NSObject):
         """Letzte Fenstergroesse aus NSUserDefaults; Fallback Defaults aus
         config. Plausibilitaets-Clamp gegen verbogene Prefs."""
         width, height = PANEL_WIDTH, PANEL_HEIGHT
+        loaded_w, loaded_h = None, None
         try:
             d = NSUserDefaults.standardUserDefaults()
             w_obj = d.objectForKey_(self._PANEL_W_KEY)
             h_obj = d.objectForKey_(self._PANEL_H_KEY)
             if w_obj is not None:
-                width = float(w_obj)
+                loaded_w = float(w_obj)
+                width = loaded_w
             if h_obj is not None:
-                height = float(h_obj)
+                loaded_h = float(h_obj)
+                height = loaded_h
         except Exception:
             log.exception("Panel-Size laden fehlgeschlagen")
         # Vernuenftige Grenzen: nicht kleiner als Default, nicht groesser als 2000
-        width = max(PANEL_WIDTH, min(2000.0, width))
-        height = max(PANEL_HEIGHT, min(2000.0, height))
-        return width, height
+        clamped_w = max(PANEL_WIDTH, min(2000.0, width))
+        clamped_h = max(PANEL_HEIGHT, min(2000.0, height))
+        log.info("Panel-Size geladen: stored=(%s,%s) -> verwendet=(%.0f,%.0f)",
+                 loaded_w, loaded_h, clamped_w, clamped_h)
+        return clamped_w, clamped_h
 
     @objc.python_method
     def _save_panel_size(self):
         try:
             frame = self.panel.frame()
+            w = float(frame.size.width)
+            h = float(frame.size.height)
             d = NSUserDefaults.standardUserDefaults()
-            d.setDouble_forKey_(float(frame.size.width), self._PANEL_W_KEY)
-            d.setDouble_forKey_(float(frame.size.height), self._PANEL_H_KEY)
+            d.setDouble_forKey_(w, self._PANEL_W_KEY)
+            d.setDouble_forKey_(h, self._PANEL_H_KEY)
+            # Force-Sync auf Platte (theoretisch deprecated, schadet aber nie —
+            # bei harten Restarts kann der Auto-Sync sonst verschluckt werden)
+            try:
+                d.synchronize()
+            except Exception:
+                pass
+            log.info("Panel-Size gespeichert: %.0f x %.0f", w, h)
         except Exception:
             log.exception("Panel-Size speichern fehlgeschlagen")
 
@@ -807,6 +847,20 @@ class TranscriptPanel(NSObject):
             pass
 
     @objc.IBAction
+    def pinClicked_(self, sender):
+        if self.on_pin_toggle:
+            self.on_pin_toggle()
+
+    @objc.python_method
+    def set_pin_label(self, floating: bool):
+        """UI-Beschriftung: 'Oben' wenn floating aktiv, 'Frei' wenn normales
+        Fensterverhalten."""
+        try:
+            self.pin_btn.setTitle_("Oben" if floating else "Frei")
+        except Exception:
+            pass
+
+    @objc.IBAction
     def ocrClicked_(self, sender):
         if self.on_ocr_click:
             self.on_ocr_click()
@@ -881,6 +935,202 @@ class AppActivationObserver(NSObject):
         return self._last_external_app
 
 
+class TrainingPanel(NSObject):
+    """Kleines Fenster zum Pflegen des Vokabulars (Begriffe + Korrekturen).
+
+    Eintrag: "Soll heissen" (Pflicht, speist Prompt + Korrektur) und optional
+    "Wird erkannt als" (Korrektur-Ausloeser). Aenderungen wirken sofort beim
+    naechsten Chunk (vocabulary-Cache wird beim Speichern aktualisiert).
+    """
+
+    _W = 420
+    _H = 470
+
+    @objc.python_method
+    def setup(self):
+        self._entries = []
+        self.table = None
+        self._build()
+        return self
+
+    @objc.python_method
+    def _build(self):
+        from AppKit import NSTableView, NSTableColumn
+        W, H, pad = self._W, self._H, 16
+        style = (
+            NSWindowStyleMaskTitled
+            | NSWindowStyleMaskClosable
+            | NSWindowStyleMaskUtilityWindow
+        )
+        self.panel = NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+            NSMakeRect(0, 0, W, H), style, NSBackingStoreBuffered, False)
+        self.panel.setTitle_("Training — Begriffe & Korrekturen")
+        self.panel.setReleasedWhenClosed_(False)
+        self.panel.setLevel_(NSFloatingWindowLevel)
+        try:
+            from AppKit import NSAppearance
+            self.panel.setAppearance_(
+                NSAppearance.appearanceNamed_("NSAppearanceNameDarkAqua"))
+        except Exception as e:
+            log.warning("Training: Dark-Mode fehlgeschlagen: %s", e)
+
+        content = self.panel.contentView()
+
+        # Erklaerung
+        info = self._make_label(
+            "Begriffe, die die App sicher kennen soll. „Wird erkannt als“ "
+            "ist optional — leer lassen, wenn der Begriff nur bekannt sein "
+            "soll. Mit Inhalt: wird automatisch ersetzt.",
+            NSMakeRect(pad, H - pad - 46, W - 2 * pad, 46),
+            size=11, color=NSColor.secondaryLabelColor())
+        info.cell().setWraps_(True)
+        content.addSubview_(info)
+
+        # Eingabezeile
+        self.wrong_field = self._make_field(
+            NSMakeRect(pad, 372, 184, 26), "Wird erkannt als (optional)")
+        content.addSubview_(self.wrong_field)
+        self.right_field = self._make_field(
+            NSMakeRect(210, 372, 194, 26), "Soll heißen")
+        content.addSubview_(self.right_field)
+
+        add_btn = self._make_button(
+            "Begriff hinzufügen", NSMakeRect(pad, 336, W - 2 * pad, 28),
+            "addClicked:")
+        content.addSubview_(add_btn)
+
+        # Tabelle
+        scroll = NSScrollView.alloc().initWithFrame_(
+            NSMakeRect(pad, 58, W - 2 * pad, 270))
+        scroll.setHasVerticalScroller_(True)
+        scroll.setBorderType_(2)  # NSBezelBorder
+        scroll.setAutohidesScrollers_(True)
+        table = NSTableView.alloc().initWithFrame_(scroll.bounds())
+        col_w = NSTableColumn.alloc().initWithIdentifier_("wrong")
+        col_w.headerCell().setStringValue_("Wird erkannt als")
+        col_w.setWidth_(180)
+        col_r = NSTableColumn.alloc().initWithIdentifier_("right")
+        col_r.headerCell().setStringValue_("Soll heißen")
+        col_r.setWidth_(176)
+        table.addTableColumn_(col_w)
+        table.addTableColumn_(col_r)
+        table.setDataSource_(self)
+        table.setDelegate_(self)
+        table.setAllowsMultipleSelection_(False)
+        table.setUsesAlternatingRowBackgroundColors_(True)
+        scroll.setDocumentView_(table)
+        content.addSubview_(scroll)
+        self.table = table
+
+        # Loeschen + Status
+        del_btn = self._make_button(
+            "Markierten löschen", NSMakeRect(pad, 16, 160, 30),
+            "deleteClicked:")
+        content.addSubview_(del_btn)
+        self.status = self._make_label(
+            "", NSMakeRect(186, 18, W - 186 - pad, 26),
+            size=11, color=NSColor.tertiaryLabelColor())
+        content.addSubview_(self.status)
+
+    # --- UI-Helfer ---
+
+    @objc.python_method
+    def _make_field(self, frame, placeholder):
+        f = NSTextField.alloc().initWithFrame_(frame)
+        f.setEditable_(True)
+        f.setBezeled_(True)
+        f.setFont_(NSFont.systemFontOfSize_(12))
+        try:
+            f.setPlaceholderString_(placeholder)
+        except Exception:
+            pass
+        return f
+
+    @objc.python_method
+    def _make_label(self, text, frame, size=11, color=None):
+        lbl = NSTextField.alloc().initWithFrame_(frame)
+        lbl.setStringValue_(text)
+        lbl.setEditable_(False)
+        lbl.setBezeled_(False)
+        lbl.setDrawsBackground_(False)
+        lbl.setSelectable_(False)
+        lbl.setFont_(NSFont.systemFontOfSize_(size))
+        if color is not None:
+            lbl.setTextColor_(color)
+        return lbl
+
+    @objc.python_method
+    def _make_button(self, title, frame, action):
+        btn = NSButton.alloc().initWithFrame_(frame)
+        btn.setTitle_(title)
+        btn.setBezelStyle_(1)  # NSBezelStyleRounded
+        btn.setTarget_(self)
+        btn.setAction_(action)
+        return btn
+
+    @objc.python_method
+    def _set_status(self, msg):
+        if getattr(self, "status", None) is not None:
+            self.status.setStringValue_(msg)
+
+    @objc.python_method
+    def _reload_entries(self):
+        self._entries = vocabulary.entries()
+        if self.table is not None:
+            self.table.reloadData()
+
+    @objc.python_method
+    def open_panel(self):
+        self._reload_entries()
+        self._set_status("%d Begriffe gepflegt" % len(self._entries))
+        self.panel.center()
+        self.panel.makeKeyAndOrderFront_(None)
+        self.panel.orderFrontRegardless()
+
+    # --- NSTableView DataSource (als ObjC-Selektoren) ---
+
+    def numberOfRowsInTableView_(self, tableView):
+        return len(self._entries)
+
+    def tableView_objectValueForTableColumn_row_(self, tableView, column, row):
+        try:
+            entry = self._entries[row]
+        except IndexError:
+            return ""
+        if str(column.identifier()) == "wrong":
+            return entry.get("wrong", "")
+        return entry.get("right", "")
+
+    # --- Actions ---
+
+    @objc.IBAction
+    def addClicked_(self, sender):
+        wrong = str(self.wrong_field.stringValue()).strip()
+        right = str(self.right_field.stringValue()).strip()
+        if not right:
+            self._set_status("Bitte „Soll heißen“ ausfüllen")
+            return
+        vocabulary.add(wrong, right)
+        self.wrong_field.setStringValue_("")
+        self.right_field.setStringValue_("")
+        self._reload_entries()
+        self._set_status("Hinzugefügt: " + right)
+
+    @objc.IBAction
+    def deleteClicked_(self, sender):
+        row = self.table.selectedRow()
+        if row is None or row < 0:
+            self._set_status("Nichts ausgewählt")
+            return
+        try:
+            entry = self._entries[row]
+        except IndexError:
+            return
+        vocabulary.remove(entry.get("wrong", ""), entry.get("right", ""))
+        self._reload_entries()
+        self._set_status("Gelöscht")
+
+
 class AudioTranskriptApp(rumps.App):
     """Menu-Bar-App mit Floating Panel."""
 
@@ -888,16 +1138,20 @@ class AudioTranskriptApp(rumps.App):
         log.info("AudioTranskriptApp.__init__ startet")
         super().__init__(APP_NAME, icon=ICON_PATH, template=True)
         self.panel = TranscriptPanel.alloc().init().setup()
+        self.training_panel = TrainingPanel.alloc().init().setup()
         self.recorder = Recorder()
         self.transcriber = Transcriber()
         self._text_was_edited = False
         self._target_app = None
         self.panel.on_mic_click = self._toggle_recording
         self.panel.on_lang_toggle = self._toggle_language
+        self.panel.on_pin_toggle = self._toggle_floating
         self.panel.on_gain_change = self._set_gain
         self.panel.on_ocr_click = self._do_screenshot_ocr
         self._language = "de"  # Whisper-Sprache, per UI umschaltbar
         self.panel.set_lang_label(self._language)
+        # Floating-Modus aus NSUserDefaults wiederherstellen (Default: True)
+        self._restore_floating()
         self._vu_timer = None
         self._health_check_timer = None
         # Recovery-Schutz: Reentrant-Lock + Cooldown gegen Recovery-Spam
@@ -919,6 +1173,8 @@ class AudioTranskriptApp(rumps.App):
         self.menu = [
             rumps.MenuItem("Oeffnen/Schliessen",
                            callback=self._toggle_panel),
+            rumps.MenuItem("Training…",
+                           callback=self._open_training),
             rumps.MenuItem("Im Hintergrund",
                            callback=self._go_background),
             None,
@@ -931,8 +1187,10 @@ class AudioTranskriptApp(rumps.App):
             "com.matze.audio-transkript",
             on_wake=lambda: _on_main(self._recover_after_wake))
 
-        # Hotkeys: F17/F18/Cmd+Shift+O via pynput; F19 via CGEventTap
-        # (verhindert macOS-Warnton, da pynput das Event nicht konsumiert)
+        # Hotkeys: F17/F18/Cmd+Shift+O via CGEventTap (Main-Thread); F19 via
+        # eigenem CGEventTap. Frueher lief das ueber pynput — dessen Listener
+        # fragte aus einem Hintergrund-Thread die Input-Source ab und crashte
+        # auf neuem macOS (HIToolbox dispatch_assert_queue/main).
         self.hotkeys = HotkeyManager(
             on_mic_toggle=self._toggle_recording,
             on_ocr_trigger=self._do_screenshot_ocr,
@@ -975,6 +1233,10 @@ class AudioTranskriptApp(rumps.App):
 
     def _toggle_panel(self, _):
         self.panel.toggle()
+
+    def _open_training(self, _):
+        """Training-Fenster oeffnen (Vokabular pflegen)."""
+        self.training_panel.open_panel()
 
     def _go_background(self, _):
         """Panel schliessen, App laeuft im Hintergrund weiter."""
@@ -1289,6 +1551,10 @@ class AudioTranskriptApp(rumps.App):
 
     def _insert_in_target(self, text):
         """Text in Ziel-App einfuegen — im Hintergrund-Thread."""
+        # Leer-Text-Schutz: sonst loest ein Cmd+V aus, das den alten
+        # Clipboard-Inhalt einfuegt.
+        if not text or not text.strip():
+            return
         target = self._target_app or self._app_observer.last_external_app()
         if not target:
             # Fallback: aktuell aktive App (falls Observer noch nichts hat)
@@ -1379,6 +1645,46 @@ class AudioTranskriptApp(rumps.App):
         log.info("Sprache umgeschaltet auf: %s", self._language)
         self.panel.set_status(
             f"Sprache: {self._language.upper()}")
+
+    # --- Floating-Toggle (Panel im Vordergrund oder normales Fenster) ---
+
+    _FLOATING_PREF_KEY = "panel_floating"
+
+    def _restore_floating(self):
+        """Letzten Floating-State aus NSUserDefaults laden (Default: True)."""
+        try:
+            d = NSUserDefaults.standardUserDefaults()
+            stored = d.objectForKey_(self._FLOATING_PREF_KEY)
+            self._floating = True if stored is None else bool(int(stored))
+        except Exception:
+            self._floating = True
+        self._apply_floating()
+        log.info("Floating-Modus wiederhergestellt: %s", self._floating)
+
+    def _toggle_floating(self):
+        self._floating = not self._floating
+        self._apply_floating()
+        try:
+            NSUserDefaults.standardUserDefaults().setInteger_forKey_(
+                1 if self._floating else 0, self._FLOATING_PREF_KEY)
+        except Exception:
+            log.exception("Floating-State konnte nicht gespeichert werden")
+        log.info("Floating umgeschaltet: %s", self._floating)
+        self.panel.set_status(
+            "Immer im Vordergrund" if self._floating
+            else "Normales Fenster (kann in den Hintergrund)")
+
+    def _apply_floating(self):
+        """Setzt Window-Level + Button-Label entsprechend self._floating."""
+        try:
+            self.panel.panel.setLevel_(
+                NSFloatingWindowLevel if self._floating else NSNormalWindowLevel)
+        except Exception:
+            log.exception("Window-Level konnte nicht gesetzt werden")
+        try:
+            self.panel.set_pin_label(self._floating)
+        except Exception:
+            pass
 
     # --- Aufnahme: Toggle-Modus (F18 / Button) ---
 
