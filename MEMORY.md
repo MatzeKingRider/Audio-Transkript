@@ -1,5 +1,57 @@
 # MEMORY — Audio Transkript
 
+## Session 2026-06-18 — v0.1.8: Inline-Training im Hauptfenster + Kontext
+
+### Warum
+Training sollte im laufenden Betrieb möglich sein, ohne ins separate
+Training-Fenster zu wechseln. Außerdem erkannte der Nutzer das Risiko des
+stumpfen Wort-für-Wort-Ersetzens (z.B. „Sprechen→Speichern" würde jedes
+„sprechen" treffen) und wollte den Kontext der Korrektur festhalten.
+
+### Was gemacht wurde
+- **Inline-Trainings-Sektion in `TranscriptPanel`** (`src/app.py`): zwei
+  Eingabefelder (falsch/richtig) + „Hinzufügen"-Button zwischen den
+  Action-Buttons und dem Transkript-Feld. Layout in `_relayout()` (fixe 64px,
+  Transkript skaliert darunter, `scroll_h = max(60, …)`).
+- **Auto-Übernahme** via neuem Delegate `textViewDidChangeSelection_`:
+  Doppelklick (Wort) / Markierung (Phrase) füllt automatisch das
+  „Falsch erkannt"-Feld. Guards: leere / >80 Zeichen / mehrzeilige Auswahl /
+  programmatische Textänderung werden ignoriert.
+- **Pfeil-„→"-Button wieder entfernt**: war als „Sicherung" gedacht, hat den
+  Nutzer aber mit dem Speicher-Button verwechselt. Auto-Übernahme reicht.
+- **Feedback verbessert**: `_show_train_status()` zeigt grün „✓ Gelernt: …"
+  (rot bei fehlendem Pflichtfeld) und blendet nach 5 s via
+  `performSelector_withObject_afterDelay_("clearTrainStatus:")` wieder aus.
+  Felder werden nach dem Speichern geleert.
+- **Kontext-Feld** (`src/vocabulary.py`): Eintrag jetzt `{wrong, right,
+  context}`. `add(wrong, right, context="")` rückwärtskompatibel; bei Duplikat
+  wird fehlender Kontext nachgetragen. `_normalize` ergänzt `context` für alte
+  JSON-Einträge. `_sentence_around()` in `TranscriptPanel` extrahiert den Satz
+  um die markierte Stelle (Grenzen `.!?\n`) und reicht ihn an `add` durch.
+- **Kontext-Spalte im `TrainingPanel`**: dritte Spalte „Kontext" (Breiten
+  100/110/165), DataSource-Methode erweitert. Manuelles Hinzufügen dort bleibt
+  ohne Kontext (default "").
+
+### Wichtig / Grenze
+- Die Korrektur-LOGIK bleibt wort-/phrasenweise (`transcriber.py:227` `\b…\b`,
+  case-insensitive). Das `context`-Feld ist **reine Doku** — verhindert
+  Fehl-Ersetzen NICHT automatisch. Echter Schutz = Wortgruppen lernen statt
+  Einzelwörter (Placeholder weist aktiv darauf hin).
+
+### Fertig
+- `py_compile` für `src/app.py` + `src/vocabulary.py` grün. Keine Reste vom
+  entfernten Capture-Button.
+
+### Offen / vom Nutzer live zu testen (GUI + Mikro)
+- Markieren → Feld füllt sich; „Hinzufügen" → grüner Hinweis erscheint + blendet
+  aus, Felder leer; Kontext-Satz steht in der neuen Spalte des Training-Fensters;
+  Fenster-Resize hält Layout; nächste Transkription nutzt Korrektur ohne Neustart.
+
+### Nebenbefund (nicht geändert)
+- Versionsstrings driften weiter (`pyproject.toml` 0.1.1, `setup.py` 0.1.0,
+  `claude_usage.py` 0.1.2) — Releases laufen über Commit-Message `v0.1.x`.
+- Untracked NICHT committet: `2026-04-22 19.28.42.jpg`, `inspect_macbook.sh`.
+
 ## Session 2026-06-17 — v0.1.7: Erkennung + Clipboard-Fix + Training-Reiter
 
 ### Warum

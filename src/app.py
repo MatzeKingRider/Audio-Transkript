@@ -309,8 +309,10 @@ class TranscriptPanel(NSObject):
         self.on_insert_click = None
         self.on_clear_click = None
         self.on_text_edited = None
+        self.on_train_add = None  # callback(wrong: str, right: str, context: str)
         self.on_usage_click = None
         self._programmatic_text_change = False
+        self._train_context = ""  # Satz, in dem die markierte Stelle vorkam
         self._build_panel()
         return self
 
@@ -574,6 +576,39 @@ class TranscriptPanel(NSObject):
         self.clear_btn.setTarget_(self); self.clear_btn.setAction_("clearClicked:")
         content.addSubview_(self.clear_btn)
 
+        # --- Inline-Training: falsch erkanntes Wort schnell korrigieren ---
+        def _make_train_field(placeholder):
+            f = NSTextField.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 24))
+            f.setEditable_(True); f.setBezeled_(True)
+            f.setFont_(NSFont.systemFontOfSize_(12))
+            try:
+                f.setPlaceholderString_(placeholder)
+            except Exception:
+                pass
+            return f
+
+        self.train_wrong = _make_train_field("Falsch erkannt (Wort/Wortgruppe markieren)")
+        content.addSubview_(self.train_wrong)
+        self.train_right = _make_train_field("Soll heißen")
+        content.addSubview_(self.train_right)
+
+        self.train_add_btn = NSButton.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 130, 26))
+        self.train_add_btn.setTitle_("Hinzufügen")
+        self.train_add_btn.setBezelStyle_(1)  # NSBezelStyleRounded
+        self.train_add_btn.setTarget_(self)
+        self.train_add_btn.setAction_("trainAddClicked:")
+        content.addSubview_(self.train_add_btn)
+
+        self.train_status = NSTextField.alloc().initWithFrame_(
+            NSMakeRect(0, 0, 100, 22))
+        self.train_status.setStringValue_("")
+        self.train_status.setEditable_(False); self.train_status.setBezeled_(False)
+        self.train_status.setDrawsBackground_(False); self.train_status.setSelectable_(False)
+        self.train_status.setFont_(NSFont.systemFontOfSize_(11))
+        self.train_status.setTextColor_(NSColor.tertiaryLabelColor())
+        content.addSubview_(self.train_status)
+
         # Claude-Code-Usage-Panel (Balken-Ansicht, ueber dem Status-Label)
         self.usage_enabled = bool(CLAUDE_USAGE_MONITOR_ENABLED)
         self.usage_view = UsagePanelView.alloc().initWithFrame_(NSMakeRect(0, 0, 100, 82))
@@ -662,8 +697,22 @@ class TranscriptPanel(NSObject):
         self.gain_label.setFrame_(NSMakeRect(vu_x, top_y + 24, vu_w, 10))
         self.gain_slider.setFrame_(NSMakeRect(vu_x, top_y - 7, vu_w, 22))
 
+        # Inline-Training-Sektion zwischen Action-Buttons und Scrollview
+        train_h = 64
+        train_y = btn_area_y + btn_h + 8
+        field_h = 24
+        fgap = 8
+        fw = (inner_w - fgap) // 2
+        row1_y = train_y + train_h - field_h  # obere Reihe: 2 Eingabefelder
+        self.train_wrong.setFrame_(NSMakeRect(pad, row1_y, fw, field_h))
+        self.train_right.setFrame_(NSMakeRect(pad + fw + fgap, row1_y, fw, field_h))
+        add_w = 130  # untere Reihe: Hinzufügen + Status
+        self.train_add_btn.setFrame_(NSMakeRect(pad, train_y, add_w, 26))
+        self.train_status.setFrame_(
+            NSMakeRect(pad + add_w + 10, train_y + 2, inner_w - add_w - 10, 22))
+
         # Mittlere Zone: Scrollview füllt den Rest
-        scroll_top_y = btn_area_y + btn_h + 8
+        scroll_top_y = train_y + train_h + 8
         round_bottom_y = top_y - lbl_h - hint_h - 8
         scroll_h = max(60, round_bottom_y - scroll_top_y)
         self.scroll_view.setFrame_(NSMakeRect(pad, scroll_top_y, inner_w, scroll_h))
@@ -801,6 +850,38 @@ class TranscriptPanel(NSObject):
         if not self._programmatic_text_change and self.on_text_edited:
             self.on_text_edited()
 
+    def textViewDidChangeSelection_(self, notification):
+        # Auswahl im Transkript automatisch ins "Falsch erkannt"-Feld übernehmen
+        if self._programmatic_text_change:
+            return
+        tv = notification.object()
+        rng = tv.selectedRange()
+        if rng.length == 0 or rng.length > 80:  # leere Auswahl/ganze Absätze ignorieren
+            return
+        full = str(tv.string())
+        sel = full[rng.location:rng.location + rng.length].strip()
+        if sel and "\n" not in sel:
+            self.train_wrong.setStringValue_(sel)
+            self._train_context = self._sentence_around(
+                full, rng.location, rng.location + rng.length)
+
+    @objc.python_method
+    def _sentence_around(self, text, start, end):
+        """Den Satz extrahieren, in dem die Auswahl [start:end] liegt.
+        Grenzen sind Satzzeichen (.!?) oder Zeilenumbrüche."""
+        bounds = ".!?\n"
+        left = 0
+        for i in range(start - 1, -1, -1):
+            if text[i] in bounds:
+                left = i + 1
+                break
+        right = len(text)
+        for i in range(end, len(text)):
+            if text[i] in bounds:
+                right = i + 1
+                break
+        return text[left:right].strip()
+
     @objc.IBAction
     def micClicked_(self, sender):
         if self.on_mic_click:
@@ -879,6 +960,37 @@ class TranscriptPanel(NSObject):
     def clearClicked_(self, sender):
         if self.on_clear_click:
             self.on_clear_click()
+
+    @objc.IBAction
+    def trainAddClicked_(self, sender):
+        wrong = str(self.train_wrong.stringValue()).strip()
+        right = str(self.train_right.stringValue()).strip()
+        if not right:
+            self._show_train_status("Bitte „Soll heißen“ ausfüllen", error=True)
+            return
+        if self.on_train_add:
+            self.on_train_add(wrong, right, self._train_context)
+        if wrong:
+            msg = "✓ Gelernt: „%s“ → „%s“" % (wrong, right)
+        else:
+            msg = "✓ Begriff gelernt: „%s“" % right
+        self.train_wrong.setStringValue_("")
+        self.train_right.setStringValue_("")
+        self._train_context = ""
+        self._show_train_status(msg)
+
+    @objc.python_method
+    def _show_train_status(self, msg, error=False):
+        """Kurzen Hinweis einblenden, der nach ein paar Sekunden verschwindet."""
+        self.train_status.setStringValue_(msg)
+        self.train_status.setTextColor_(
+            NSColor.systemRedColor() if error else NSColor.systemGreenColor())
+        NSObject.cancelPreviousPerformRequestsWithTarget_(self)
+        self.performSelector_withObject_afterDelay_("clearTrainStatus:", None, 5.0)
+
+    def clearTrainStatus_(self, _):
+        self.train_status.setStringValue_("")
+        self.train_status.setTextColor_(NSColor.tertiaryLabelColor())
 
 
 class AppActivationObserver(NSObject):
@@ -1008,12 +1120,16 @@ class TrainingPanel(NSObject):
         table = NSTableView.alloc().initWithFrame_(scroll.bounds())
         col_w = NSTableColumn.alloc().initWithIdentifier_("wrong")
         col_w.headerCell().setStringValue_("Wird erkannt als")
-        col_w.setWidth_(180)
+        col_w.setWidth_(100)
         col_r = NSTableColumn.alloc().initWithIdentifier_("right")
         col_r.headerCell().setStringValue_("Soll heißen")
-        col_r.setWidth_(176)
+        col_r.setWidth_(110)
+        col_c = NSTableColumn.alloc().initWithIdentifier_("context")
+        col_c.headerCell().setStringValue_("Kontext")
+        col_c.setWidth_(165)
         table.addTableColumn_(col_w)
         table.addTableColumn_(col_r)
+        table.addTableColumn_(col_c)
         table.setDataSource_(self)
         table.setDelegate_(self)
         table.setAllowsMultipleSelection_(False)
@@ -1097,8 +1213,11 @@ class TrainingPanel(NSObject):
             entry = self._entries[row]
         except IndexError:
             return ""
-        if str(column.identifier()) == "wrong":
+        ident = str(column.identifier())
+        if ident == "wrong":
             return entry.get("wrong", "")
+        if ident == "context":
+            return entry.get("context", "")
         return entry.get("right", "")
 
     # --- Actions ---
@@ -1164,6 +1283,7 @@ class AudioTranskriptApp(rumps.App):
         self.panel.on_insert_click = self._insert_panel_text
         self.panel.on_clear_click = self._clear_text
         self.panel.on_text_edited = self._on_text_edited
+        self.panel.on_train_add = self._add_training_term
         self._recording_start = None
         self._recording_timer = None
         self._chunk_timer = None
@@ -1454,6 +1574,17 @@ class AudioTranskriptApp(rumps.App):
 
     def _on_text_edited(self):
         self._text_was_edited = True
+
+    @objc.python_method
+    def _add_training_term(self, wrong, right, context=""):
+        """Inline-Training: Begriff in den Vokabular-Speicher uebernehmen."""
+        vocabulary.add(wrong, right, context)
+        # Falls separates Training-Fenster offen ist, Liste aktualisieren
+        try:
+            if self.training_panel.panel.isVisible():
+                self.training_panel._reload_entries()
+        except Exception:
+            pass
 
     # --- Claude-Code-Usage ---
 
